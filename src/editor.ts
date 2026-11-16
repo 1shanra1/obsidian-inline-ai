@@ -11,12 +11,18 @@ import { markerRanges } from "./core";
 // What each tag in flight is doing now ("Searching the web", "Writing"), by id.
 const statuses = new Map<string, string>();
 
+/** Whether a tag is still being worked on in this session. */
+export function isInFlight(id: string): boolean {
+  return statuses.has(id);
+}
+
 /** Updates the label on a tag's pill, wherever it's showing. */
 export function setPillStatus(id: string, status: string | null) {
   if (status === null) statuses.delete(id);
   else statuses.set(id, status);
   for (const el of Array.from(document.querySelectorAll<HTMLElement>(`.inline-ai-thinking[data-ai-id="${id}"] > span`))) {
     el.textContent = status ?? "Thinking";
+    el.parentElement?.classList.remove("is-stopped");
   }
 }
 
@@ -29,7 +35,9 @@ class PillWidget extends WidgetType {
     pill.className = "inline-ai-thinking";
     pill.dataset.aiId = this.id;
     const label = pill.appendChild(document.createElement("span"));
-    label.textContent = statuses.get(this.id) ?? "Thinking";
+    // A pill nobody is working on, e.g. Obsidian closed while it waited.
+    if (!statuses.has(this.id)) pill.classList.add("is-stopped");
+    label.textContent = statuses.get(this.id) ?? "Interrupted · run Clean up old tags";
     return pill;
   }
   eq(other: PillWidget): boolean {

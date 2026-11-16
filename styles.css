@@ -48,6 +48,10 @@
   .inline-ai-thinking > span { color: var(--text-muted); background: none; }
 }
 
+/* A tag that was interrupted (Obsidian closed while it waited). */
+.inline-ai-thinking.is-stopped::before { animation: none; background: var(--text-faint); }
+.inline-ai-thinking.is-stopped > span { animation: none; background: none; color: var(--text-muted); }
+
 /* A sent tag, while editing: the %% around it are hidden. */
 .inline-ai-tag {
   color: var(--text-muted);

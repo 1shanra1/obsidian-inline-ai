@@ -28,10 +28,13 @@ export interface Change {
   insert: string;
 }
 
-/** What a tag comes back with: text to put at the tag, and edits elsewhere if any. */
+/** What a tag comes back with. */
 export interface Result {
-  answer: string;
-  edits: Edit[] | null;
+  answer: string; // text that takes the tag's place
+  edits: Edit[] | null; // changes elsewhere in the note, if Claude asked for any
+  note?: string; // a few words on what an edit changed, shown as a pop-up
+  error?: string; // why it failed; the tag comes back as plain text
+  searchFailed?: string; // a web search error code, if a search didn't work
 }
 
 // The thinking pill. styles.css animates it; the answer replaces it.
@@ -78,27 +81,6 @@ export function findPlaceholder(lines: string[], id: string): number {
   return lines.findIndex((l) => l.includes(marker(id)));
 }
 
-/**
- * The new text for the thinking line at index i. Keeps anything you typed on
- * that line, and adds blank lines around the answer so tables and other
- * blocks render.
- */
-export function replacementFor(lines: string[], i: number, id: string, answer: string): string {
-  const line = lines[i];
-  const re = new RegExp(escapeRegex(marker(id)) + THINKING_RE);
-  const m = re.exec(line)!;
-  const before = line.slice(0, m.index);
-  const after = line.slice(m.index + m[0].length).trimStart();
-
-  let block = answer.trim();
-  const above = before.trim() !== "" ? before : i > 0 ? lines[i - 1] : "";
-  const below = after.trim() !== "" ? after : i < lines.length - 1 ? lines[i + 1] : "";
-  if (above.trim() !== "") block = "\n" + block;
-  if (below.trim() !== "") block = block + "\n";
-
-  return (before.trim() !== "" ? before + "\n" : "") + block + (after.trim() !== "" ? "\n" + after : "");
-}
-
 export interface MarkerRanges {
   hide: [number, number][]; // "%%" around a sent tag
   tag: [number, number][]; // the sent tag's text, shown as a chip
@@ -123,25 +105,86 @@ export function markerRanges(text: string, tagWord = "@ai"): MarkerRanges {
   return out;
 }
 
-/** Puts the answer where the thinking line is. Returns null if that line is gone. */
-export function applyAnswer(text: string, id: string, answer: string): string | null {
+/**
+ * A tag in flight: its hidden request line and the thinking line under it.
+ * When the tag is done, the whole slot is replaced, so the request doesn't
+ * linger in the note.
+ */
+export interface Slot {
+  from: number; // start of the request line (or the thinking line, if the request line is gone)
+  to: number; // end of the thinking line
+  hereFrom: number; // where the request comment starts
+  hereTo: number; // where the thinking pill ends
+  keptBefore: string[]; // anything you'd typed before the tag or the pill on those lines
+  keptAfter: string; // anything typed after the pill
+  restore: string; // the slot as plain text with the tag unsent, e.g. "@ai a table"
+  above: string; // the line just above the slot
+  below: string; // the line just below it
+}
+
+export function findSlot(text: string, id: string, tagWord = "@ai"): Slot | null {
   const lines = text.split("\n");
   const i = findPlaceholder(lines, id);
   if (i < 0) return null;
-  lines[i] = replacementFor(lines, i, id, answer);
-  return lines.join("\n");
+  const starts: number[] = [];
+  let o = 0;
+  for (const l of lines) {
+    starts.push(o);
+    o += l.length + 1;
+  }
+  const line = lines[i];
+  const m = new RegExp(escapeRegex(marker(id)) + THINKING_RE).exec(line)!;
+  const beforePill = line.slice(0, m.index).trimEnd();
+  const afterPill = line.slice(m.index + m[0].length).trim();
+  const tagM = i > 0 ? new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%\\s*$`).exec(lines[i - 1]) : null;
+  const first = tagM ? i - 1 : i;
+  const beforeTag = tagM ? lines[i - 1].slice(0, tagM.index).trimEnd() : "";
+  return {
+    from: starts[first],
+    to: starts[i] + line.length,
+    hereFrom: tagM ? starts[i - 1] + tagM.index : starts[i] + m.index,
+    hereTo: starts[i] + m.index + m[0].length,
+    keptBefore: [beforeTag, beforePill].filter((t) => t !== ""),
+    keptAfter: afterPill,
+    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter((t) => t.trim() !== "").join("\n"),
+    above: first > 0 ? lines[first - 1] : "",
+    below: i < lines.length - 1 ? lines[i + 1] : "",
+  };
+}
+
+function allSlots(text: string, tagWord: string): { id: string; slot: Slot }[] {
+  const out: { id: string; slot: Slot }[] = [];
+  for (const m of text.matchAll(/%%ai:([a-z0-9]+)%%/g)) {
+    const slot = findSlot(text, m[1], tagWord);
+    if (slot) out.push({ id: m[1], slot });
+  }
+  return out;
+}
+
+// The text that takes a finished slot's place: the answer, with blank lines
+// around it so tables and other blocks render, plus anything you'd typed there.
+function slotText(slot: Slot, answer: string): string {
+  if (!answer.trim()) return [...slot.keptBefore, slot.keptAfter].filter((t) => t !== "").join("\n");
+  let block = answer.trim();
+  const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
+  const below = slot.keptAfter || slot.below;
+  if (above.trim() !== "") block = "\n" + block;
+  if (below.trim() !== "") block = block + "\n";
+  return [...slot.keptBefore, block, ...(slot.keptAfter ? [slot.keptAfter] : [])].join("\n");
 }
 
 /**
- * The whole note with the tag's spot marked. Other tags still thinking are
- * left out, so they don't distract.
+ * The whole note, with this tag's request and pill replaced by a marker for
+ * the spot. Other tags still in flight are left out, so they don't distract
+ * and can't be edited. (The request itself is sent separately.)
  */
-export function buildContext(text: string, at: number): string {
-  const strip = (t: string) => t.replace(/%%ai:[a-z0-9]+%%(?:<span class="inline-ai-thinking"><span>[^<]*<\/span><\/span>)?/g, "");
-  return strip(text.slice(0, at)) + HERE + strip(text.slice(at));
+export function buildContext(text: string, id: string, tagWord = "@ai"): string {
+  const cuts = allSlots(text, tagWord)
+    .map(({ id: other, slot }) => ({ from: slot.hereFrom, to: slot.hereTo, insert: other === id ? HERE : "" }));
+  return applyChanges(text, cuts);
 }
 
-const BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply is inserted at that spot, marked ${HERE}, and becomes part of the note. The request itself sits in a comment just above the spot.
+const BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply takes the place of the spot where they typed the request, marked ${HERE}, and becomes part of the note. The request is given after the note.
 
 Reading the request:
 - It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
@@ -152,6 +195,7 @@ Writing the reply:
 - Make it read like part of the note: same language, voice and formatting habits as the text around it.
 - No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
 - For a fact check, say plainly whether it holds up and correct only what's off.
+- If figures for the year or period asked about aren't published yet, say so in a few words and give the newest published figures with their year.
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
 - Output only the content to insert, never wrapped in a code block.
@@ -162,8 +206,10 @@ Web search, when available:
 
 const EDIT_PROMPT = `Changing the note:
 - When the request asks to change text that is already in the note (fix, correct, update, rewrite, shorten, reformat, "make this ..."), call edit_note instead of writing a reply.
-- Each edit's find is copied character for character from the note, just long enough to appear only once, and covers only the passage that changes. Never include the request comment or ${HERE}.
-- Call edit_note at most once, with every edit, as your last step. Its note is optional: one short line saying what you changed, shown at the spot. Write nothing else.
+- Each edit's find is copied character for character from the note, just long enough to appear only once, and covers only the passage that changes. Never include ${HERE}.
+- To remove something, replace it with an empty string. Blank lines left behind are tidied up for you.
+- Lines like %%@ai ...%% are earlier requests whose answers are already in the note. When you remove what one asked for, remove its line too.
+- Call edit_note at most once, with every edit, as your last step. Its note is a few words on what you changed, shown briefly as a pop-up, not added to the note. Write nothing else.
 - If the request asks a question or wants new content, reply as usual and don't edit.`;
 
 export function systemPrompt(allowEdits = true): string {
@@ -189,7 +235,7 @@ export const EDIT_TOOL = {
           required: ["find", "replace"],
         },
       },
-      note: { type: "string", description: "Optional: one short line saying what changed, shown where the request was made." },
+      note: { type: "string", description: "A few words on what changed, shown as a brief pop-up." },
     },
     required: ["edits"],
   },
@@ -234,8 +280,8 @@ export function errorMessage(status: number, json: any): string {
   const type = json?.error?.type;
   const msg: string | undefined = json?.error?.message;
   if (status === 401 || type === "authentication_error") return "Anthropic didn't accept the API key. Check it in Inline AI's settings.";
-  if (status === 429 || type === "rate_limit_error") return "hit the API rate limit. Wait a moment and tag again.";
-  if (status === 529 || type === "overloaded_error") return "Anthropic is overloaded right now. Tag again in a minute.";
+  if (status === 429 || type === "rate_limit_error") return "hit the API rate limit. Wait a moment and try again.";
+  if (status === 529 || type === "overloaded_error") return "Anthropic is overloaded right now. Try again in a minute.";
   if (status === 404 || type === "not_found_error") return `${msg ?? "not found"}. Check the model name in Inline AI's settings.`;
   return msg ?? `the request failed (HTTP ${status}).`;
 }
@@ -291,40 +337,40 @@ export function parseResponse(status: number, json: any, showSources = false): s
 }
 
 /**
- * What the reply asks for: edits if Claude called edit_note (its note goes at
- * the tag), otherwise the text to insert.
+ * What the reply asks for: edits if Claude called edit_note, otherwise the
+ * text to insert. Notes whether a web search failed.
  */
 export function resultFrom(blocks: any[], stopReason: string, showSources = false): Result {
+  const failed = blocks.find((b) => b?.type === "web_search_tool_result" && b.content?.type === "web_search_tool_result_error");
+  const searchFailed: string | undefined = failed ? failed.content.error_code ?? "unknown" : undefined;
   const call = blocks.find((b) => b?.type === "tool_use" && b.name === EDIT_TOOL.name);
-  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null };
+  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchFailed };
   const input = call.input;
   const ok = input && Array.isArray(input.edits) && input.edits.every((e: any) => e && typeof e.find === "string" && typeof e.replace === "string");
   if (!ok) throw new Error(stopReason === "max_tokens" ? "the edit was cut off by the max tokens setting." : "Claude's edit came back incomplete.");
   return {
-    answer: typeof input.note === "string" ? input.note.trim() : "",
+    answer: "",
     edits: input.edits.map((e: Edit) => ({ find: e.find, replace: e.replace })),
+    note: typeof input.note === "string" ? input.note.trim() : "",
+    searchFailed,
   };
-}
-
-function editFailure(reason: string): string {
-  return `> [!warning] Inline AI couldn't make the edit: ${reason} Nothing was changed, so tag again.`;
 }
 
 /**
  * Checks Claude's edits against the note as it is now. Returns their ranges,
  * or a reason they can't be applied. Each passage must appear exactly once,
- * and none may touch the plugin's markers or the thinking line.
+ * and none may touch a tag that's still in flight.
  */
 function locateEdits(text: string, edits: Edit[], protectedRanges: [number, number][]): Change[] | string {
   const out: Change[] = [];
   for (const e of edits) {
     if (!e.find) return "an edit didn't say which text to change.";
-    if (e.find.includes(HERE) || e.find.includes("%%ai:") || e.replace.includes("%%ai:")) return "an edit reached into the request itself.";
+    if (e.find.includes(HERE) || e.replace.includes("%%ai:")) return "an edit reached into the request itself.";
     const at = text.indexOf(e.find);
     if (at < 0) return "the text it meant to change isn't in the note any more.";
     if (text.indexOf(e.find, at + 1) >= 0) return "the text it meant to change appears more than once.";
     const end = at + e.find.length;
-    if (protectedRanges.some(([p, q]) => at < q && p < end)) return "an edit reached into the request itself.";
+    if (protectedRanges.some(([p, q]) => at < q && p < end)) return "an edit reached into a request that's still waiting.";
     out.push({ from: at, to: end, insert: e.replace });
   }
   out.sort((a, b) => a.from - b.from);
@@ -332,47 +378,116 @@ function locateEdits(text: string, edits: Edit[], protectedRanges: [number, numb
   return out;
 }
 
+const WS = /[ \t\n]/;
+const BLANK_LINE = /\n[ \t]*\n/;
+
 /**
- * Every change a result makes to the note, by offsets into the note as it is
- * now, so they can go in as one undoable edit. The thinking line becomes the
- * answer (or goes away after an edit with no note). If any edit can't be
- * applied, none are, and a warning takes the thinking line's place.
- * Returns null if the thinking line has been deleted.
+ * Where a change removes text, also removes the blank lines it leaves behind,
+ * so at most one blank line separates what's left (none if there was none).
  */
-export function planChanges(text: string, id: string, result: Result, tagWord = "@ai"): { changes: Change[]; edited: number } | null {
-  const lines = text.split("\n");
-  const i = findPlaceholder(lines, id);
-  if (i < 0) return null;
-  const lineStart = lines.slice(0, i).reduce((n, l) => n + l.length + 1, 0);
-  const lineEnd = lineStart + lines[i].length;
-  const atTag = (answer: string): Change => ({ from: lineStart, to: lineEnd, insert: replacementFor(lines, i, id, answer) });
+export function tidyGaps(text: string, changes: Change[]): Change[] {
+  const sorted = [...changes].sort((a, b) => a.from - b.from);
+  type Gap = Change & { blank: boolean; para: boolean };
+  const out: Gap[] = [];
+  sorted.forEach((c, k) => {
+    const lo = k > 0 ? sorted[k - 1].to : 0;
+    const hi = k < sorted.length - 1 ? sorted[k + 1].from : text.length;
+    if (c.insert.trim() !== "") return out.push({ ...c, blank: false, para: false });
+    let L = c.from;
+    while (L > lo && WS.test(text[L - 1])) L--;
+    let R = c.to;
+    while (R < hi) {
+      const nl = text.indexOf("\n", R);
+      const end = nl < 0 ? text.length : nl + 1;
+      if (end > hi || text.slice(R, end).trim() !== "") break;
+      R = end;
+    }
+    const removed = text.slice(c.from, c.to);
+    const left = text.slice(L, c.from) + /^\s*/.exec(removed)![0];
+    const right = /\s*$/.exec(removed)![0] + text.slice(c.to, R);
+    if (!(left + c.insert + right).includes("\n")) return out.push({ ...c, blank: false, para: false }); // within a line: leave as is
+    out.push({ from: L, to: R, insert: "", blank: true, para: BLANK_LINE.test(left) || BLANK_LINE.test(right) });
+  });
+  // Neighbouring removals become one, then each gets its separator.
+  const merged: Gap[] = [];
+  for (const g of out) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.blank && g.blank && g.from <= prev.to) {
+      prev.to = Math.max(prev.to, g.to);
+      prev.para = prev.para || g.para || BLANK_LINE.test(text.slice(prev.to, g.from));
+    } else merged.push({ ...g });
+  }
+  return merged.map((g) => {
+    if (!g.blank) return { from: g.from, to: g.to, insert: g.insert };
+    const sep = g.from === 0 ? "" : g.to === text.length ? (text.endsWith("\n") ? "\n" : "") : g.para ? "\n\n" : "\n";
+    return { from: g.from, to: g.to, insert: sep };
+  });
+}
 
-  if (!result.edits) return { changes: [atTag(result.answer)], edited: 0 };
+/**
+ * How to finish a tag. First the slot goes back to plain text (restore),
+ * kept out of undo history so that undoing the answer brings back the tag
+ * you typed; then the changes, which are the answer or edits and are planned
+ * on the text before restore (see mapThrough). On failure there are no
+ * changes and the restored tag stays. Returns null if the thinking line has
+ * been deleted.
+ */
+export interface Plan {
+  restore: Change;
+  changes: Change[];
+  edited: number;
+  failure?: string;
+}
 
-  const r = markerRanges(text, tagWord);
+export function planChanges(text: string, id: string, result: Result, tagWord = "@ai"): Plan | null {
+  const slot = findSlot(text, id, tagWord);
+  if (!slot) return null;
+  const restore: Change = { from: slot.from, to: slot.to, insert: slot.restore };
+  if (result.error) return { restore, changes: [], edited: 0, failure: result.error };
+  if (!result.edits) return { restore, changes: tidyGaps(text, [{ from: slot.from, to: slot.to, insert: slotText(slot, result.answer) }]), edited: 0 };
+
   const protectedRanges: [number, number][] = [
-    [Math.max(0, lineStart - 1), lineEnd + 1], // the thinking line and the line breaks around it
-    ...r.tag.map(([a, b]): [number, number] => [a - 2, b + 2]),
-    ...r.pill,
+    [Math.max(0, slot.from - 1), slot.to + 1],
+    ...allSlots(text, tagWord).map(({ slot: s }): [number, number] => [s.from, s.to]),
   ];
   const located = locateEdits(text, result.edits, protectedRanges);
-  if (typeof located === "string") return { changes: [atTag(editFailure(located))], edited: 0 };
-
-  if (result.answer.trim()) return { changes: [...located, atTag(result.answer)], edited: located.length };
-  return { changes: [...located, removeThinkingLine(lines, i, id, lineStart, lineEnd)], edited: located.length };
+  if (typeof located === "string") return { restore, changes: [], edited: 0, failure: `couldn't make the edit: ${located}` };
+  const changes = tidyGaps(text, [...located, { from: slot.from, to: slot.to, insert: slotText(slot, "") }]);
+  return { restore, changes, edited: located.length };
 }
 
-// Removes the thinking line, keeping anything typed on it.
-function removeThinkingLine(lines: string[], i: number, id: string, lineStart: number, lineEnd: number): Change {
-  const line = lines[i];
-  const m = new RegExp(escapeRegex(marker(id)) + THINKING_RE).exec(line)!;
-  const kept = [line.slice(0, m.index).trimEnd(), line.slice(m.index + m[0].length).trim()].filter((t) => t !== "").join("\n");
-  if (kept) return { from: lineStart, to: lineEnd, insert: kept };
-  if (i < lines.length - 1) return { from: lineStart, to: lineEnd + 1, insert: "" };
-  return { from: Math.max(0, lineStart - 1), to: lineEnd, insert: "" };
+/** Moves changes planned on the text before `restore` onto the text after it. */
+export function mapThrough(changes: Change[], r: Change): Change[] {
+  const delta = r.insert.length - (r.to - r.from);
+  const map = (p: number, end: boolean) => (p <= r.from ? p : p >= r.to ? p + delta : end ? r.from + r.insert.length : r.from);
+  return changes.map((c) => ({ from: map(c.from, false), to: map(c.to, true), insert: c.insert }));
 }
 
-/** Applies changes made by planChanges to the text they were planned on. */
+/** The note after a plan: what the editor shows once both steps are done. */
+export function finalText(text: string, plan: Plan): string {
+  return applyChanges(applyChanges(text, [plan.restore]), mapThrough(plan.changes, plan.restore));
+}
+
+/**
+ * Tidies a note: tags that were interrupted (their pill isn't in flight) go
+ * back to plain text so you can send them again, and request comments left
+ * by earlier versions are removed.
+ */
+export function cleanupChanges(text: string, tagWord: string, isLive: (id: string) => boolean): Change[] {
+  const changes: Change[] = [];
+  const slots = allSlots(text, tagWord);
+  for (const { id, slot } of slots) if (!isLive(id)) changes.push({ from: slot.from, to: slot.to, insert: slot.restore });
+  const tagRe = new RegExp(`%%${escapeRegex(tagWord)}\\s[^\\n]*?%%`, "g");
+  for (const m of text.matchAll(tagRe)) {
+    const a = m.index!;
+    const b = a + m[0].length;
+    if (slots.some(({ slot }) => a >= slot.from && b <= slot.to)) continue;
+    changes.push({ from: a, to: b, insert: "" });
+  }
+  return tidyGaps(text, changes);
+}
+
+/** Applies changes, all given by offsets into the same text. */
 export function applyChanges(text: string, changes: Change[]): string {
   let out = text;
   for (const c of [...changes].sort((a, b) => b.from - a.from)) out = out.slice(0, c.from) + c.insert + out.slice(c.to);

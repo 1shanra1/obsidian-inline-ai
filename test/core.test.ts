@@ -10,6 +10,16 @@ function send(text: string, n: number, id: string): string {
   return lines.join("\n");
 }
 
+// Finishes a tag the way the plugin does, and checks the two-step delivery
+// lands on the same text as applying the plan in one go.
+function finish(text: string, id: string, result: core.Result): string {
+  const plan = core.planChanges(text, id, result)!;
+  const out = core.finalText(text, plan);
+  if (plan.changes.length) assert.equal(core.applyChanges(text, plan.changes), out, "restore + mapped changes == direct changes");
+  return out;
+}
+const answer = (text: string, id: string, a: string) => finish(text, id, { answer: a, edits: null });
+
 test("finds a tag and its request", () => {
   assert.deepEqual(core.findTag("@ai a table of planets"), { start: 0, request: "a table of planets" });
   assert.deepEqual(core.findTag("Moons are odd. @ai list the big ones  "), { start: 15, request: "list the big ones" });
@@ -34,52 +44,57 @@ test("sending hides the tag and adds a thinking line", () => {
   assert.equal(core.findTag(out.split("\n")[1]), null);
 });
 
-test("answer lands under the tag even after typing above and below", () => {
+test("the answer takes the tag's place, even after typing above and below", () => {
   let text = send("# Book notes\nChapter 1\n@ai a table of the characters\n", 2, "id1");
-  // keep writing below, then add lines above
   text += "Chapter 2 starts in Paris.\nMore thoughts.";
   text = "Intro line\n\n" + text;
-  const out = core.applyAnswer(text, "id1", "| Name | Role |\n|---|---|\n| Ana | Hero |")!;
   assert.equal(
-    out,
-    "Intro line\n\n# Book notes\nChapter 1\n%%@ai a table of the characters%%\n\n" +
-      "| Name | Role |\n|---|---|\n| Ana | Hero |\n\nChapter 2 starts in Paris.\nMore thoughts.",
+    answer(text, "id1", "| Name | Role |\n|---|---|\n| Ana | Hero |"),
+    "Intro line\n\n# Book notes\nChapter 1\n\n| Name | Role |\n|---|---|\n| Ana | Hero |\n\nChapter 2 starts in Paris.\nMore thoughts.",
   );
+});
+
+test("text before the tag on its line stays", () => {
+  const text = send("Notes\nMoons are odd. @ai a list\nmore", 1, "t1");
+  assert.equal(answer(text, "t1", "- Io"), "Notes\nMoons are odd.\n\n- Io\n\nmore");
 });
 
 test("several tags in flight resolve in any order", () => {
   let text = "A\n@ai first\nB\n@ai second\nC";
   text = send(text, 1, "one");
   text = send(text, 4, "two");
-  text = core.applyAnswer(text, "two", "SECOND")!;
-  text = core.applyAnswer(text, "one", "FIRST")!;
-  const lines = text.split("\n");
-  assert.equal(lines[lines.indexOf("%%@ai first%%") + 2], "FIRST");
-  assert.equal(lines[lines.indexOf("%%@ai second%%") + 2], "SECOND");
-  assert.ok(!text.includes("%%ai:"));
+  text = answer(text, "two", "SECOND");
+  text = answer(text, "one", "FIRST");
+  assert.equal(text, "A\n\nFIRST\n\nB\n\nSECOND\n\nC");
 });
 
 test("text typed on the thinking line is kept", () => {
   let text = send("x\n@ai hi\n", 1, "k");
   text = text.replace("</span></span>", "</span></span> oops typed here");
-  const out = core.applyAnswer(text, "k", "Hello")!;
-  assert.equal(out, "x\n%%@ai hi%%\n\nHello\n\noops typed here\n");
+  assert.equal(answer(text, "k", "Hello"), "x\n\nHello\n\noops typed here\n");
+});
+
+test("a failed tag comes back as the plain text you typed", () => {
+  const text = send("Notes\nMoons are odd. @ai a list\nmore", 1, "f1");
+  const plan = core.planChanges(text, "f1", { answer: "", edits: null, error: "couldn't answer: overloaded" })!;
+  assert.equal(plan.failure, "couldn't answer: overloaded");
+  assert.deepEqual(plan.changes, []);
+  assert.equal(core.finalText(text, plan), "Notes\nMoons are odd. @ai a list\nmore");
+  assert.ok(core.findTag(core.finalText(text, plan).split("\n")[1]), "it can be sent again");
 });
 
 test("an answer whose thinking line was deleted is dropped", () => {
   const text = send("x\n@ai hi", 1, "gone").replace(/\n%%ai:gone.*$/, "");
-  assert.equal(core.applyAnswer(text, "gone", "Hello"), null);
+  assert.equal(core.planChanges(text, "gone", { answer: "Hello", edits: null }), null);
 });
 
-test("context is the whole note with the tag's spot marked", () => {
-  const text = "# Myth\nPara one.\n%%@ai check this%%\n%%ai:k1%%<span class=\"inline-ai-thinking\"><span>Thinking</span></span>\nAfter.";
-  const at = text.indexOf("%%ai:k1");
-  assert.equal(core.buildContext(text, at), "# Myth\nPara one.\n%%@ai check this%%\n<<<AI_TAG_HERE>>>\nAfter.");
+test("context is the whole note with the tag's spot marked and other tags left out", () => {
+  let text = send(send("# Myth\nPara one. @ai check this\nAfter.\n@ai other", 1, "k1"), 4, "k2");
+  assert.equal(core.buildContext(text, "k1"), "# Myth\nPara one. <<<AI_TAG_HERE>>>\nAfter.\n");
 });
 
 test("a placeholder from 0.1.0 is still replaced cleanly", () => {
-  const out = core.applyAnswer("x\n%%@ai hi%%\n%%ai:old%% ⏳ *AI is thinking…*\n", "old", "Hello");
-  assert.equal(out, "x\n%%@ai hi%%\n\nHello\n");
+  assert.equal(answer("x\n%%@ai hi%%\n%%ai:old%% ⏳ *AI is thinking…*\n", "old", "Hello"), "x\n\nHello\n");
 });
 
 test("pulls out SVG blocks", () => {
@@ -172,86 +187,103 @@ test("finds the markers to hide while editing", () => {
 // ---- 0.3.0: edits and streaming
 
 const noteWithTag = (id: string) =>
-  "# Moons\nEuropa has 79 moons around it.\nIo is volcanic.\n%%@ai fix the moon count%%\n%%ai:" + id +
-  '%%<span class="inline-ai-thinking"><span>Thinking</span></span>\nMore notes.';
+  send("# Moons\n\nEuropa has 79 moons around it.\n\nIo is volcanic.\n\n@ai fix the moon count\nMore notes.", 6, id);
 
 test("the edit tool is offered when edits are on", () => {
   const { body } = core.buildRequest({ ...settings, allowEdits: true }, "x", "y");
-  const tools = body.tools as any[];
-  assert.equal(tools[1].name, "edit_note");
+  assert.equal((body.tools as any[])[1].name, "edit_note");
   assert.match(body.system as string, /edit_note/);
   assert.equal((core.buildRequest({ ...settings, allowEdits: true, webSearch: false }, "x", "y").body.tools as any[]).length, 1);
 });
 
-test("reads an edit_note call, ignoring any text around it", () => {
+test("reads an edit_note call, with its note for the pop-up", () => {
   const blocks = [
     { type: "text", text: "I'll fix that." },
     { type: "tool_use", name: "edit_note", input: { edits: [{ find: "79 moons", replace: "about 95 moons" }], note: " Fixed the count. " } },
   ];
-  assert.deepEqual(core.resultFrom(blocks, "tool_use"), { answer: "Fixed the count.", edits: [{ find: "79 moons", replace: "about 95 moons" }] });
-  assert.deepEqual(core.resultFrom([{ type: "text", text: "Hi" }], "end_turn"), { answer: "Hi", edits: null });
+  assert.deepEqual(core.resultFrom(blocks, "tool_use"), { answer: "", edits: [{ find: "79 moons", replace: "about 95 moons" }], note: "Fixed the count.", searchFailed: undefined });
+  assert.deepEqual(core.resultFrom([{ type: "text", text: "Hi" }], "end_turn"), { answer: "Hi", edits: null, searchFailed: undefined });
   assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: null }], "max_tokens"), /cut off/);
   assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: { edits: [{ find: 1 }] } }], "tool_use"), /incomplete/);
 });
 
-test("an edit changes text above the tag and the note lands at the tag", () => {
-  const text = noteWithTag("e1");
-  const plan = core.planChanges(text, "e1", { answer: "Fixed the count.", edits: [{ find: "has 79 moons around it", replace: "is a moon of Jupiter" }] })!;
-  assert.equal(plan.edited, 1);
-  assert.equal(
-    core.applyChanges(text, plan.changes),
-    "# Moons\nEuropa is a moon of Jupiter.\nIo is volcanic.\n%%@ai fix the moon count%%\n\nFixed the count.\n\nMore notes.",
-  );
+test("notices when a web search failed", () => {
+  const blocks = [{ type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "too_many_requests" } }, { type: "text", text: "From memory." }];
+  assert.equal(core.resultFrom(blocks, "end_turn").searchFailed, "too_many_requests");
 });
 
-test("an edit with no note removes the thinking line", () => {
-  const text = noteWithTag("e2");
-  const plan = core.planChanges(text, "e2", { answer: "", edits: [{ find: "Io is volcanic.", replace: "Io is the most volcanic body known." }] })!;
-  assert.equal(
-    core.applyChanges(text, plan.changes),
-    "# Moons\nEuropa has 79 moons around it.\nIo is the most volcanic body known.\n%%@ai fix the moon count%%\nMore notes.",
-  );
-  // last line of the note
-  const last = "Alpha\n%%@ai x%%\n%%ai:z%%<span class=\"inline-ai-thinking\"><span>Thinking</span></span>";
-  assert.equal(core.applyChanges(last, core.planChanges(last, "z", { answer: "", edits: [{ find: "Alpha", replace: "Beta" }] })!.changes), "Beta\n%%@ai x%%");
+test("an edit changes text above, and the tag leaves no trace", () => {
+  const text = noteWithTag("e1");
+  const plan = core.planChanges(text, "e1", { answer: "", note: "Fixed it", edits: [{ find: "has 79 moons around it", replace: "is a moon of Jupiter" }] })!;
+  assert.equal(plan.edited, 1);
+  assert.equal(finish(text, "e1", { answer: "", edits: [{ find: "has 79 moons around it", replace: "is a moon of Jupiter" }] }),
+    "# Moons\n\nEuropa is a moon of Jupiter.\n\nIo is volcanic.\n\nMore notes.");
+});
+
+test("removing sections leaves no blank gaps", () => {
+  const text = "# Data\n\nIntro.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n\n| c | d |\n|---|---|\n| 3 | 4 |\n\nOutro.";
+  const out = core.applyChanges(text, core.tidyGaps(text, [
+    { from: text.indexOf("| a"), to: text.indexOf("| 2 |") + 5, insert: "" },
+    { from: text.indexOf("| c"), to: text.indexOf("| 4 |") + 5, insert: "- 2026: 5" },
+  ]));
+  assert.equal(out, "# Data\n\nIntro.\n\n- 2026: 5\n\nOutro.");
+  // a list item goes without adding a blank line
+  const list = "- a\n- b\n- c";
+  assert.equal(core.applyChanges(list, core.tidyGaps(list, [{ from: 4, to: 7, insert: "" }])), "- a\n- c");
+  // inside a line, nothing extra is touched
+  const line = "the big cat";
+  assert.equal(core.applyChanges(line, core.tidyGaps(line, [{ from: 4, to: 7, insert: "" }])), "the  cat");
+  // at the very start and end
+  const ends = "TOP\n\nmiddle\n\nEND\n";
+  assert.equal(core.applyChanges(ends, core.tidyGaps(ends, [{ from: 0, to: 3, insert: "" }, { from: 13, to: 16, insert: "" }])), "middle\n");
+});
+
+test("an edit can remove old request lines from earlier versions", () => {
+  let text = "Facts.\n\n%%@ai old ask%%\n\n| t |\n\n@ai remove the table\nNext.";
+  text = send(text, 6, "r1");
+  const out = finish(text, "r1", { answer: "", edits: [{ find: "%%@ai old ask%%", replace: "" }, { find: "| t |", replace: "" }] });
+  assert.equal(out, "Facts.\n\nNext.");
 });
 
 test("several edits apply together, in any order", () => {
   const text = noteWithTag("e3");
-  const plan = core.planChanges(text, "e3", {
-    answer: "",
-    edits: [
-      { find: "More notes.", replace: "More notes!" },
-      { find: "# Moons", replace: "# Moons of the solar system" },
-    ],
-  })!;
-  const out = core.applyChanges(text, plan.changes);
+  const out = finish(text, "e3", { answer: "", edits: [{ find: "More notes.", replace: "More notes!" }, { find: "# Moons", replace: "# Moons of the solar system" }] });
   assert.ok(out.startsWith("# Moons of the solar system\n") && out.endsWith("\nMore notes!"));
-  assert.equal(plan.edited, 2);
 });
 
-test("edits that can't be placed safely change nothing and leave a warning", () => {
-  const text = noteWithTag("e4");
+test("edits that can't be placed safely change nothing and bring the tag back", () => {
+  let text = noteWithTag("e4");
+  text = send(text + "\n@ai another", text.split("\n").length, "busy");
   const check = (edits: core.Edit[], reason: RegExp) => {
-    const plan = core.planChanges(text, "e4", { answer: "note", edits })!;
+    const plan = core.planChanges(text, "e4", { answer: "", edits })!;
     assert.equal(plan.edited, 0);
-    assert.equal(plan.changes.length, 1);
-    const out = core.applyChanges(text, plan.changes);
-    assert.match(out, reason);
-    assert.match(out, /\[!warning\] Inline AI couldn't make the edit/);
-    assert.ok(out.includes("Europa has 79 moons around it.\nIo is volcanic."), "note text untouched");
+    assert.deepEqual(plan.changes, []);
+    assert.match(plan.failure!, reason);
+    const out = core.finalText(text, plan);
+    assert.ok(out.includes("Europa has 79 moons around it.\n\nIo is volcanic.\n\n@ai fix the moon count\nMore notes."), out);
   };
   check([{ find: "Ganymede", replace: "x" }], /isn't in the note/);
   check([{ find: "o", replace: "0" }], /more than once/);
-  check([{ find: "fix the moon count", replace: "x" }], /request itself/);
-  check([{ find: "volcanic.\n%%@ai", replace: "x" }], /request itself/);
   check([{ find: "<<<AI_TAG_HERE>>>", replace: "x" }], /request itself/);
+  check([{ find: "@ai another", replace: "x" }], /still waiting/);
   check([{ find: "has 79", replace: "a" }, { find: "79 moons", replace: "b" }], /overlapped/);
   check([{ find: "", replace: "x" }], /didn't say/);
 });
 
-test("an edit for a deleted thinking line is dropped", () => {
-  assert.equal(core.planChanges("a\nb", "nope", { answer: "", edits: [{ find: "a", replace: "c" }] }), null);
+test("clean-up brings interrupted tags back and removes old request lines", () => {
+  let text = "A\n\n%%@ai stale%%\n\nB\nSome text %%@ai inline stale%%\n@ai waiting\n@ai live\nC";
+  text = send(send(text, 6, "dead"), 8, "alive");
+  const out = core.applyChanges(text, core.cleanupChanges(text, "@ai", (id) => id === "alive"));
+  assert.equal(out, 'A\n\nB\nSome text\n@ai waiting\n%%@ai live%%\n%%ai:alive%%<span class="inline-ai-thinking"><span>Thinking</span></span>\nC');
+});
+
+test("mapping changes through the restore step", () => {
+  const r = { from: 5, to: 10, insert: "ab" };
+  assert.deepEqual(core.mapThrough([{ from: 0, to: 2, insert: "x" }, { from: 5, to: 10, insert: "y" }, { from: 12, to: 14, insert: "z" }], r), [
+    { from: 0, to: 2, insert: "x" },
+    { from: 5, to: 7, insert: "y" },
+    { from: 9, to: 11, insert: "z" },
+  ]);
 });
 
 // Splits a list of events into SSE text, then feeds it in awkward chunks.

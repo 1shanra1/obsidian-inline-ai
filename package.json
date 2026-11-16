@@ -1,6 +1,6 @@
 {
   "name": "obsidian-inline-ai",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Tag Claude inline in an Obsidian note and keep writing.",
   "scripts": {
@@ -9,6 +9,7 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@codemirror/commands": "^6.11.1",
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
     "obsidian": "^1.14.4",

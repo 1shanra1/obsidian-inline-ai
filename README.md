@@ -1,6 +1,6 @@
 # Inline AI for Obsidian
 
-Type `@ai` and a request anywhere in a note, press Enter, and keep writing. Claude's answer appears right under the tag when it's ready. Works on iPad and desktop.
+Type `@ai` and a request anywhere in a note, press Enter, and keep writing. When Claude's answer is ready, it takes the tag's place. Works on iPad and desktop.
 
 ```
 Moons of the outer planets are wild.
@@ -10,13 +10,15 @@ I should look into Europa's ocean next...
 
 You can have several tags waiting at once. Ask for text, a table, a Mermaid diagram or chart, or an image (saved as an SVG file in your attachments folder).
 
-Claude can also change what's already there. Write `@ai fix the dates in the paragraph above` or `@ai update these numbers to 2026`, and it edits that text in place. One undo reverts the whole edit. If the text changed while Claude was working, it changes nothing and leaves a note asking you to tag again.
+Claude can also change what's already there. Write `@ai fix the dates in the paragraph above` or `@ai update these numbers to 2026`, and it edits that text in place, tidies up any blank lines left behind, and tells you what it changed in a pop-up. If the text changed while Claude was working, it changes nothing.
+
+A tag is temporary: once it's answered, it's gone, and the note keeps only your writing and Claude's answers. One undo turns an answer or an edit back into the `@ai ...` text you typed. If something goes wrong, a pop-up says what, and your tag comes back as text, so you can press Enter at its end to send it again.
 
 ## How it works
 
-1. When you finish a line with a tag, the plugin hides the tag in a comment (`%%@ai ...%%`) and puts an animated "Thinking" pill under it, tagged with a hidden id.
+1. When you finish a line with a tag, the plugin hides the tag in a comment (`%%@ai ...%%`) and puts an animated "Thinking" pill under it, tagged with a hidden id. If Obsidian closes while a tag is waiting, its pill says "Interrupted"; the command "Inline AI: Clean up old tags in this note" turns it back into text, and also removes request lines left by versions before 0.3.1.
 2. It sends your request and the whole note, with the tag's spot marked, to the Anthropic API and streams the reply, so a long web search can't time out. The pill shows what Claude is doing: thinking, searching the web, writing or editing. Claude answers about the text around the tag, keeps it short, and searches the web when it needs facts. If streaming isn't possible, it falls back to one ordinary request.
-3. When the answer comes back, it finds the pill by its id and replaces it. If Claude asked to edit the note, each edit must match exactly one passage, and all of them go in with the answer as a single change. It edits through the editor, so your typing isn't disturbed, and the answer still lands in the right place if you added lines above or below.
+3. When the answer comes back, it finds the pill by its id and replaces the tag and the pill with it. If Claude asked to edit the note, each edit must match exactly one passage, and all of them go in as a single change. It edits through the editor, so your typing isn't disturbed, and the answer still lands in the right place if you added lines above or below.
 
 While you edit, the `%%` markers stay hidden: a sent tag shows as a quiet chip and a waiting answer as the pill. Put the cursor on the line to see the raw text.
 

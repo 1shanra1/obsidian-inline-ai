@@ -23,6 +23,8 @@ __export(main_exports, {
   default: () => InlineAIPlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_commands = require("@codemirror/commands");
+var import_state2 = require("@codemirror/state");
 var import_obsidian3 = require("obsidian");
 
 // src/core.ts
@@ -51,19 +53,6 @@ function dispatchText(line, tag, id) {
 function findPlaceholder(lines, id) {
   return lines.findIndex((l) => l.includes(marker(id)));
 }
-function replacementFor(lines, i, id, answer) {
-  const line = lines[i];
-  const re = new RegExp(escapeRegex(marker(id)) + THINKING_RE);
-  const m = re.exec(line);
-  const before = line.slice(0, m.index);
-  const after = line.slice(m.index + m[0].length).trimStart();
-  let block = answer.trim();
-  const above = before.trim() !== "" ? before : i > 0 ? lines[i - 1] : "";
-  const below = after.trim() !== "" ? after : i < lines.length - 1 ? lines[i + 1] : "";
-  if (above.trim() !== "") block = "\n" + block;
-  if (below.trim() !== "") block = block + "\n";
-  return (before.trim() !== "" ? before + "\n" : "") + block + (after.trim() !== "" ? "\n" + after : "");
-}
 function markerRanges(text, tagWord = "@ai") {
   const out = { hide: [], tag: [], pill: [] };
   const tagRe = new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%`, "g");
@@ -77,11 +66,57 @@ function markerRanges(text, tagWord = "@ai") {
   for (let m; m = pillRe.exec(text); ) out.pill.push([m.index, m.index + m[0].length]);
   return out;
 }
-function buildContext(text, at) {
-  const strip = (t) => t.replace(/%%ai:[a-z0-9]+%%(?:<span class="inline-ai-thinking"><span>[^<]*<\/span><\/span>)?/g, "");
-  return strip(text.slice(0, at)) + HERE + strip(text.slice(at));
+function findSlot(text, id, tagWord = "@ai") {
+  const lines = text.split("\n");
+  const i = findPlaceholder(lines, id);
+  if (i < 0) return null;
+  const starts = [];
+  let o = 0;
+  for (const l of lines) {
+    starts.push(o);
+    o += l.length + 1;
+  }
+  const line = lines[i];
+  const m = new RegExp(escapeRegex(marker(id)) + THINKING_RE).exec(line);
+  const beforePill = line.slice(0, m.index).trimEnd();
+  const afterPill = line.slice(m.index + m[0].length).trim();
+  const tagM = i > 0 ? new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%\\s*$`).exec(lines[i - 1]) : null;
+  const first = tagM ? i - 1 : i;
+  const beforeTag = tagM ? lines[i - 1].slice(0, tagM.index).trimEnd() : "";
+  return {
+    from: starts[first],
+    to: starts[i] + line.length,
+    hereFrom: tagM ? starts[i - 1] + tagM.index : starts[i] + m.index,
+    hereTo: starts[i] + m.index + m[0].length,
+    keptBefore: [beforeTag, beforePill].filter((t) => t !== ""),
+    keptAfter: afterPill,
+    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter((t) => t.trim() !== "").join("\n"),
+    above: first > 0 ? lines[first - 1] : "",
+    below: i < lines.length - 1 ? lines[i + 1] : ""
+  };
 }
-var BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply is inserted at that spot, marked ${HERE}, and becomes part of the note. The request itself sits in a comment just above the spot.
+function allSlots(text, tagWord) {
+  const out = [];
+  for (const m of text.matchAll(/%%ai:([a-z0-9]+)%%/g)) {
+    const slot = findSlot(text, m[1], tagWord);
+    if (slot) out.push({ id: m[1], slot });
+  }
+  return out;
+}
+function slotText(slot, answer) {
+  if (!answer.trim()) return [...slot.keptBefore, slot.keptAfter].filter((t) => t !== "").join("\n");
+  let block = answer.trim();
+  const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
+  const below = slot.keptAfter || slot.below;
+  if (above.trim() !== "") block = "\n" + block;
+  if (below.trim() !== "") block = block + "\n";
+  return [...slot.keptBefore, block, ...slot.keptAfter ? [slot.keptAfter] : []].join("\n");
+}
+function buildContext(text, id, tagWord = "@ai") {
+  const cuts = allSlots(text, tagWord).map(({ id: other, slot }) => ({ from: slot.hereFrom, to: slot.hereTo, insert: other === id ? HERE : "" }));
+  return applyChanges(text, cuts);
+}
+var BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply takes the place of the spot where they typed the request, marked ${HERE}, and becomes part of the note. The request is given after the note.
 
 Reading the request:
 - It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
@@ -92,6 +127,7 @@ Writing the reply:
 - Make it read like part of the note: same language, voice and formatting habits as the text around it.
 - No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
 - For a fact check, say plainly whether it holds up and correct only what's off.
+- If figures for the year or period asked about aren't published yet, say so in a few words and give the newest published figures with their year.
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
 - Output only the content to insert, never wrapped in a code block.
@@ -101,8 +137,10 @@ Web search, when available:
 - Use what you find without describing the search. If a figure is uncertain, say so in a few words.`;
 var EDIT_PROMPT = `Changing the note:
 - When the request asks to change text that is already in the note (fix, correct, update, rewrite, shorten, reformat, "make this ..."), call edit_note instead of writing a reply.
-- Each edit's find is copied character for character from the note, just long enough to appear only once, and covers only the passage that changes. Never include the request comment or ${HERE}.
-- Call edit_note at most once, with every edit, as your last step. Its note is optional: one short line saying what you changed, shown at the spot. Write nothing else.
+- Each edit's find is copied character for character from the note, just long enough to appear only once, and covers only the passage that changes. Never include ${HERE}.
+- To remove something, replace it with an empty string. Blank lines left behind are tidied up for you.
+- Lines like %%@ai ...%% are earlier requests whose answers are already in the note. When you remove what one asked for, remove its line too.
+- Call edit_note at most once, with every edit, as your last step. Its note is a few words on what you changed, shown briefly as a pop-up, not added to the note. Write nothing else.
 - If the request asks a question or wants new content, reply as usual and don't edit.`;
 function systemPrompt(allowEdits = true) {
   return allowEdits ? BASE_PROMPT + "\n\n" + EDIT_PROMPT : BASE_PROMPT;
@@ -124,7 +162,7 @@ var EDIT_TOOL = {
           required: ["find", "replace"]
         }
       },
-      note: { type: "string", description: "Optional: one short line saying what changed, shown where the request was made." }
+      note: { type: "string", description: "A few words on what changed, shown as a brief pop-up." }
     },
     required: ["edits"]
   }
@@ -166,8 +204,8 @@ function errorMessage(status, json) {
   const type = json?.error?.type;
   const msg = json?.error?.message;
   if (status === 401 || type === "authentication_error") return "Anthropic didn't accept the API key. Check it in Inline AI's settings.";
-  if (status === 429 || type === "rate_limit_error") return "hit the API rate limit. Wait a moment and tag again.";
-  if (status === 529 || type === "overloaded_error") return "Anthropic is overloaded right now. Tag again in a minute.";
+  if (status === 429 || type === "rate_limit_error") return "hit the API rate limit. Wait a moment and try again.";
+  if (status === 529 || type === "overloaded_error") return "Anthropic is overloaded right now. Try again in a minute.";
   if (status === 404 || type === "not_found_error") return `${msg ?? "not found"}. Check the model name in Inline AI's settings.`;
   return msg ?? `the request failed (HTTP ${status}).`;
 }
@@ -202,62 +240,109 @@ function domainOf(url) {
   return m ? m[1] : "source";
 }
 function resultFrom(blocks, stopReason, showSources = false) {
+  const failed = blocks.find((b) => b?.type === "web_search_tool_result" && b.content?.type === "web_search_tool_result_error");
+  const searchFailed = failed ? failed.content.error_code ?? "unknown" : void 0;
   const call = blocks.find((b) => b?.type === "tool_use" && b.name === EDIT_TOOL.name);
-  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null };
+  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchFailed };
   const input = call.input;
   const ok = input && Array.isArray(input.edits) && input.edits.every((e) => e && typeof e.find === "string" && typeof e.replace === "string");
   if (!ok) throw new Error(stopReason === "max_tokens" ? "the edit was cut off by the max tokens setting." : "Claude's edit came back incomplete.");
   return {
-    answer: typeof input.note === "string" ? input.note.trim() : "",
-    edits: input.edits.map((e) => ({ find: e.find, replace: e.replace }))
+    answer: "",
+    edits: input.edits.map((e) => ({ find: e.find, replace: e.replace })),
+    note: typeof input.note === "string" ? input.note.trim() : "",
+    searchFailed
   };
-}
-function editFailure(reason) {
-  return `> [!warning] Inline AI couldn't make the edit: ${reason} Nothing was changed, so tag again.`;
 }
 function locateEdits(text, edits, protectedRanges) {
   const out = [];
   for (const e of edits) {
     if (!e.find) return "an edit didn't say which text to change.";
-    if (e.find.includes(HERE) || e.find.includes("%%ai:") || e.replace.includes("%%ai:")) return "an edit reached into the request itself.";
+    if (e.find.includes(HERE) || e.replace.includes("%%ai:")) return "an edit reached into the request itself.";
     const at = text.indexOf(e.find);
     if (at < 0) return "the text it meant to change isn't in the note any more.";
     if (text.indexOf(e.find, at + 1) >= 0) return "the text it meant to change appears more than once.";
     const end = at + e.find.length;
-    if (protectedRanges.some(([p, q]) => at < q && p < end)) return "an edit reached into the request itself.";
+    if (protectedRanges.some(([p, q]) => at < q && p < end)) return "an edit reached into a request that's still waiting.";
     out.push({ from: at, to: end, insert: e.replace });
   }
   out.sort((a, b) => a.from - b.from);
   for (let k = 1; k < out.length; k++) if (out[k].from < out[k - 1].to) return "two of its edits overlapped.";
   return out;
 }
+var WS = /[ \t\n]/;
+var BLANK_LINE = /\n[ \t]*\n/;
+function tidyGaps(text, changes) {
+  const sorted = [...changes].sort((a, b) => a.from - b.from);
+  const out = [];
+  sorted.forEach((c, k) => {
+    const lo = k > 0 ? sorted[k - 1].to : 0;
+    const hi = k < sorted.length - 1 ? sorted[k + 1].from : text.length;
+    if (c.insert.trim() !== "") return out.push({ ...c, blank: false, para: false });
+    let L = c.from;
+    while (L > lo && WS.test(text[L - 1])) L--;
+    let R = c.to;
+    while (R < hi) {
+      const nl = text.indexOf("\n", R);
+      const end = nl < 0 ? text.length : nl + 1;
+      if (end > hi || text.slice(R, end).trim() !== "") break;
+      R = end;
+    }
+    const removed = text.slice(c.from, c.to);
+    const left = text.slice(L, c.from) + /^\s*/.exec(removed)[0];
+    const right = /\s*$/.exec(removed)[0] + text.slice(c.to, R);
+    if (!(left + c.insert + right).includes("\n")) return out.push({ ...c, blank: false, para: false });
+    out.push({ from: L, to: R, insert: "", blank: true, para: BLANK_LINE.test(left) || BLANK_LINE.test(right) });
+  });
+  const merged = [];
+  for (const g of out) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.blank && g.blank && g.from <= prev.to) {
+      prev.to = Math.max(prev.to, g.to);
+      prev.para = prev.para || g.para || BLANK_LINE.test(text.slice(prev.to, g.from));
+    } else merged.push({ ...g });
+  }
+  return merged.map((g) => {
+    if (!g.blank) return { from: g.from, to: g.to, insert: g.insert };
+    const sep = g.from === 0 ? "" : g.to === text.length ? text.endsWith("\n") ? "\n" : "" : g.para ? "\n\n" : "\n";
+    return { from: g.from, to: g.to, insert: sep };
+  });
+}
 function planChanges(text, id, result, tagWord = "@ai") {
-  const lines = text.split("\n");
-  const i = findPlaceholder(lines, id);
-  if (i < 0) return null;
-  const lineStart = lines.slice(0, i).reduce((n, l) => n + l.length + 1, 0);
-  const lineEnd = lineStart + lines[i].length;
-  const atTag = (answer) => ({ from: lineStart, to: lineEnd, insert: replacementFor(lines, i, id, answer) });
-  if (!result.edits) return { changes: [atTag(result.answer)], edited: 0 };
-  const r = markerRanges(text, tagWord);
+  const slot = findSlot(text, id, tagWord);
+  if (!slot) return null;
+  const restore = { from: slot.from, to: slot.to, insert: slot.restore };
+  if (result.error) return { restore, changes: [], edited: 0, failure: result.error };
+  if (!result.edits) return { restore, changes: tidyGaps(text, [{ from: slot.from, to: slot.to, insert: slotText(slot, result.answer) }]), edited: 0 };
   const protectedRanges = [
-    [Math.max(0, lineStart - 1), lineEnd + 1],
-    // the thinking line and the line breaks around it
-    ...r.tag.map(([a, b]) => [a - 2, b + 2]),
-    ...r.pill
+    [Math.max(0, slot.from - 1), slot.to + 1],
+    ...allSlots(text, tagWord).map(({ slot: s }) => [s.from, s.to])
   ];
   const located = locateEdits(text, result.edits, protectedRanges);
-  if (typeof located === "string") return { changes: [atTag(editFailure(located))], edited: 0 };
-  if (result.answer.trim()) return { changes: [...located, atTag(result.answer)], edited: located.length };
-  return { changes: [...located, removeThinkingLine(lines, i, id, lineStart, lineEnd)], edited: located.length };
+  if (typeof located === "string") return { restore, changes: [], edited: 0, failure: `couldn't make the edit: ${located}` };
+  const changes = tidyGaps(text, [...located, { from: slot.from, to: slot.to, insert: slotText(slot, "") }]);
+  return { restore, changes, edited: located.length };
 }
-function removeThinkingLine(lines, i, id, lineStart, lineEnd) {
-  const line = lines[i];
-  const m = new RegExp(escapeRegex(marker(id)) + THINKING_RE).exec(line);
-  const kept = [line.slice(0, m.index).trimEnd(), line.slice(m.index + m[0].length).trim()].filter((t) => t !== "").join("\n");
-  if (kept) return { from: lineStart, to: lineEnd, insert: kept };
-  if (i < lines.length - 1) return { from: lineStart, to: lineEnd + 1, insert: "" };
-  return { from: Math.max(0, lineStart - 1), to: lineEnd, insert: "" };
+function mapThrough(changes, r) {
+  const delta = r.insert.length - (r.to - r.from);
+  const map = (p, end) => p <= r.from ? p : p >= r.to ? p + delta : end ? r.from + r.insert.length : r.from;
+  return changes.map((c) => ({ from: map(c.from, false), to: map(c.to, true), insert: c.insert }));
+}
+function finalText(text, plan) {
+  return applyChanges(applyChanges(text, [plan.restore]), mapThrough(plan.changes, plan.restore));
+}
+function cleanupChanges(text, tagWord, isLive) {
+  const changes = [];
+  const slots = allSlots(text, tagWord);
+  for (const { id, slot } of slots) if (!isLive(id)) changes.push({ from: slot.from, to: slot.to, insert: slot.restore });
+  const tagRe = new RegExp(`%%${escapeRegex(tagWord)}\\s[^\\n]*?%%`, "g");
+  for (const m of text.matchAll(tagRe)) {
+    const a = m.index;
+    const b = a + m[0].length;
+    if (slots.some(({ slot }) => a >= slot.from && b <= slot.to)) continue;
+    changes.push({ from: a, to: b, insert: "" });
+  }
+  return tidyGaps(text, changes);
 }
 function applyChanges(text, changes) {
   let out = text;
@@ -359,11 +444,15 @@ var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 var import_obsidian = require("obsidian");
 var statuses = /* @__PURE__ */ new Map();
+function isInFlight(id) {
+  return statuses.has(id);
+}
 function setPillStatus(id, status) {
   if (status === null) statuses.delete(id);
   else statuses.set(id, status);
   for (const el of Array.from(document.querySelectorAll(`.inline-ai-thinking[data-ai-id="${id}"] > span`))) {
     el.textContent = status ?? "Thinking";
+    el.parentElement?.classList.remove("is-stopped");
   }
 }
 var PillWidget = class extends import_view.WidgetType {
@@ -376,7 +465,8 @@ var PillWidget = class extends import_view.WidgetType {
     pill2.className = "inline-ai-thinking";
     pill2.dataset.aiId = this.id;
     const label = pill2.appendChild(document.createElement("span"));
-    label.textContent = statuses.get(this.id) ?? "Thinking";
+    if (!statuses.has(this.id)) pill2.classList.add("is-stopped");
+    label.textContent = statuses.get(this.id) ?? "Interrupted \xB7 run Clean up old tags";
     return pill2;
   }
   eq(other) {
@@ -502,6 +592,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
     this.lineCounts = /* @__PURE__ */ new WeakMap();
+    this.delivering = false;
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -514,11 +605,22 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
         if (ctx.file) this.sendTag(editor, ctx.file, editor.getCursor().line, true);
       }
     });
+    this.addCommand({
+      id: "clean-up-tags",
+      name: "Clean up old tags in this note",
+      editorCallback: (editor) => {
+        const changes = cleanupChanges(editor.getValue(), this.settings.tagWord, isInFlight);
+        if (!changes.length) return new import_obsidian3.Notice("Inline AI: no old tags in this note.");
+        editor.transaction({ changes: changes.map((c) => ({ from: editor.offsetToPos(c.from), to: editor.offsetToPos(c.to), text: c.insert })) });
+        new import_obsidian3.Notice("Inline AI: cleaned up old tags. Interrupted ones are back as plain text, so you can send them again.");
+      }
+    });
     this.registerEvent(
       this.app.workspace.on("editor-change", (editor, info) => {
         const count = editor.lineCount();
         const before = this.lineCounts.get(editor) ?? count;
         this.lineCounts.set(editor, count);
+        if (this.delivering) return;
         if (!this.settings.autoTrigger || count <= before || !info.file) return;
         const line = editor.getCursor().line;
         if (line > 0) this.sendTag(editor, info.file, line - 1, false);
@@ -546,10 +648,10 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
       return;
     }
     const id = newId();
+    setPillStatus(id, "Thinking");
     editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
-    const at = editor.posToOffset({ line: lineNo + 1, ch: 0 });
-    const context = buildContext(editor.getValue(), at);
-    this.ask(id, tag.request, context, file.basename).then(async (result) => ({ ...result, answer: await this.saveSvgs(result.answer, file, id) })).catch((err) => ({ answer: `> [!warning] Inline AI couldn't answer: ${errorText(err)}`, edits: null })).then((result) => this.deliver(file, id, result)).finally(() => setPillStatus(id, null));
+    const context = buildContext(editor.getValue(), id, this.settings.tagWord);
+    this.ask(id, tag.request, context, file.basename).then(async (result) => ({ ...result, answer: await this.saveSvgs(result.answer, file, id) })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then((result) => this.deliver(file, id, result)).finally(() => setPillStatus(id, null));
   }
   async ask(id, request, context, title) {
     const { url, headers, body } = buildRequest(this.settings, request, context, title);
@@ -608,13 +710,13 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
         parser.push(decoder.decode(value, { stream: true }));
       }
     } catch (err) {
-      if (idle) throw new Error("Claude went quiet for two minutes, so the request was stopped. Tag again.");
+      if (idle) throw new Error("Claude went quiet for two minutes, so the request was stopped.");
       throw err;
     } finally {
       window.clearTimeout(timer);
     }
     const blocks = parser.finish();
-    if (!parser.stopReason) throw new Error("the connection dropped before Claude finished. Tag again.");
+    if (!parser.stopReason) throw new Error("the connection dropped before Claude finished.");
     return { blocks, stopReason: parser.stopReason };
   }
   async callOnce(url, headers, body) {
@@ -638,32 +740,59 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     }
     return out;
   }
-  // Puts the answer where the thinking line is, and makes any edits, all in
-  // one change so a single undo reverts it. Uses the open editor when it can,
-  // so your typing isn't disturbed; otherwise edits the file directly.
+  // Finishes a tag: the answer takes its place, or the edits are made and it
+  // goes away, or on failure it comes back as the plain text you typed. Uses
+  // the open editor when it can, so your typing isn't disturbed and one undo
+  // reverts the whole thing; otherwise edits the file directly.
   async deliver(file, id, result) {
     const tagWord = this.settings.tagWord;
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
       if (!(view instanceof import_obsidian3.MarkdownView) || view.file !== file || view.getMode() !== "source") continue;
-      const editor = view.editor;
-      const plan = planChanges(editor.getValue(), id, result, tagWord);
-      if (!plan) continue;
-      editor.transaction({
-        changes: plan.changes.map((c) => ({ from: editor.offsetToPos(c.from), to: editor.offsetToPos(c.to), text: c.insert }))
-      });
-      if (plan.edited) new import_obsidian3.Notice(`Inline AI edited ${plural(plan.edited, "passage")}. Undo reverts it.`);
-      return;
+      const plan2 = planChanges(view.editor.getValue(), id, result, tagWord);
+      if (!plan2) continue;
+      const undoable = this.applyPlan(view.editor, plan2);
+      return this.report(plan2, result, undoable);
     }
-    let edited = -1;
+    let plan = null;
     await this.app.vault.process(file, (text) => {
-      const plan = planChanges(text, id, result, tagWord);
-      if (!plan) return text;
-      edited = plan.edited;
-      return applyChanges(text, plan.changes);
+      plan = planChanges(text, id, result, tagWord);
+      return plan ? finalText(text, plan) : text;
     });
-    if (edited < 0) new import_obsidian3.Notice("Inline AI: an answer arrived, but its thinking line was deleted, so it was dropped.");
-    else if (edited) new import_obsidian3.Notice(`Inline AI edited ${plural(edited, "passage")} in ${file.basename}.`);
+    if (plan) this.report(plan, result, false);
+    else new import_obsidian3.Notice("Inline AI: an answer arrived, but its thinking line was deleted, so it was dropped.");
+  }
+  // Applies a plan in the editor. Returns whether one undo reverts it to the
+  // plain tag you typed.
+  applyPlan(editor, plan) {
+    const cm = editor.cm;
+    this.delivering = true;
+    try {
+      if (cm && typeof cm.dispatch === "function") {
+        cm.dispatch({ changes: plan.restore, annotations: import_state2.Transaction.addToHistory.of(false) });
+        if (plan.changes.length) cm.dispatch({ changes: mapThrough(plan.changes, plan.restore), annotations: import_commands.isolateHistory.of("full") });
+        return true;
+      }
+      const changes = plan.changes.length ? plan.changes : [plan.restore];
+      editor.transaction({ changes: changes.map((c) => ({ from: editor.offsetToPos(c.from), to: editor.offsetToPos(c.to), text: c.insert })) });
+      return false;
+    } finally {
+      this.delivering = false;
+      this.lineCounts.set(editor, editor.lineCount());
+    }
+  }
+  // Edits and problems are reported in a pop-up, so the note only holds your
+  // writing and Claude's answers.
+  report(plan, result, undoable) {
+    if (plan.failure) {
+      new import_obsidian3.Notice(`Inline AI ${plan.failure} Your tag is back as text: tap at its end and press Enter to send it again.`, 15e3);
+    } else if (plan.edited) {
+      const what = result.note || `Edited ${plural(plan.edited, "passage")}.`;
+      new import_obsidian3.Notice(`Inline AI: ${what}${/[.!?]$/.test(what) ? "" : "."}${undoable ? " Undo reverts it." : ""}`, 8e3);
+    }
+    if (result.searchFailed && !plan.failure) {
+      new import_obsidian3.Notice(`Inline AI: web search didn't work this time (${result.searchFailed.replace(/_/g, " ")}), so Claude answered without it.`, 1e4);
+    }
   }
 };
 var IDLE_LIMIT_MS = 12e4;
@@ -672,7 +801,7 @@ function plural(n, word) {
 }
 function errorText(err) {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/timed? ?out/i.test(msg)) return "the request timed out. Tag again, or turn off web search for quick asks.";
-  if (/failed to fetch|load failed|network|offline|ERR_/i.test(msg)) return `couldn't reach Anthropic (${msg}). Check your connection and tag again.`;
+  if (/timed? ?out/i.test(msg)) return "the request timed out.";
+  if (/failed to fetch|load failed|network|offline|ERR_/i.test(msg)) return `couldn't reach Anthropic (${msg}). Check your connection.`;
   return msg;
 }
