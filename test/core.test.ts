@@ -359,3 +359,38 @@ test("a paused streamed turn resumes with its blocks as they arrived", () => {
   const next = core.resumeBody(body, p.finish());
   assert.deepEqual(next.messages[1].content, [{ type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } }]);
 });
+
+// ---- 0.4.0: answer cards
+
+test("short answers stay plain text", () => {
+  assert.equal(core.formatAnswer("About 95 moons (2023 count).", "how many moons?"), "About 95 moons (2023 count).");
+  assert.equal(core.formatAnswer("Yes, that holds up.\n\nThe figure is from 2022.", "is this right?"), "Yes, that holds up.\n\nThe figure is from 2022.");
+});
+
+test("a titled answer becomes a foldable card", () => {
+  const out = core.formatAnswer("Title: **Myth as shared meaning.**\nMay says myths give a group a shared story.\n\n**Example:** the frontier myth.", "explain this");
+  assert.equal(out, "> [!ai]+ Myth as shared meaning\n> May says myths give a group a shared story.\n>\n> **Example:** the frontier myth.");
+});
+
+test("a long untitled answer gets a card titled by the request", () => {
+  const body = "| Year | Rate |\n|---|---|\n| 2023 | 5% |";
+  assert.equal(core.formatAnswer(body, "get me the newest numbers?"), "> [!ai]+ Get me the newest numbers\n> | Year | Rate |\n> |---|---|\n> | 2023 | 5% |");
+  const long = core.formatAnswer("word ".repeat(120), "x".repeat(80));
+  assert.match(long, /^> \[!ai\]\+ Xx+…\n> word/);
+});
+
+test("with cards off, answers stay plain and lose the title line", () => {
+  assert.equal(core.formatAnswer("Title: Myth\nBody text.", "q", false), "Body text.");
+});
+
+test("a card lands in the note in place of the tag", () => {
+  const text = send("Para.\n@ai explain this\nNext.", 1, "c1");
+  assert.equal(answer(text, "c1", core.formatAnswer("Title: Idea\nOne.\n\nTwo.", "explain this")), "Para.\n\n> [!ai]+ Idea\n> One.\n>\n> Two.\n\nNext.");
+});
+
+test("the prompt asks for length to fit the request and a title for longer replies", () => {
+  const p = core.systemPrompt(false);
+  assert.match(p, /reading companion/);
+  assert.match(p, /Fit the length to the request/);
+  assert.match(p, /"Title: "/);
+});

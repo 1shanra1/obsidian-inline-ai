@@ -80,7 +80,10 @@ export default class InlineAIPlugin extends Plugin {
     const context = core.buildContext(editor.getValue(), id, this.settings.tagWord);
 
     this.ask(id, tag.request, context, file.basename)
-      .then(async (result) => ({ ...result, answer: await this.saveSvgs(result.answer, file, id) }))
+      .then(async (result) => ({
+        ...result,
+        answer: core.formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards),
+      }))
       .catch((err): core.Result => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` }))
       .then((result) => this.deliver(file, id, result))
       .finally(() => setPillStatus(id, null));

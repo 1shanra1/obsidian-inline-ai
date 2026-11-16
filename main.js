@@ -116,17 +116,25 @@ function buildContext(text, id, tagWord = "@ai") {
   const cuts = allSlots(text, tagWord).map(({ id: other, slot }) => ({ from: slot.hereFrom, to: slot.hereTo, insert: other === id ? HERE : "" }));
   return applyChanges(text, cuts);
 }
-var BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply takes the place of the spot where they typed the request, marked ${HERE}, and becomes part of the note. The request is given after the note.
+var BASE_PROMPT = `You are a reading companion inside the user's Obsidian note. They take notes while reading books, and they want help understanding and remembering what they read: explanations, numbers and facts, answers to their questions, examples, and links between ideas. While writing, they typed a quick request. Your reply takes the place of the spot where they typed it, marked ${HERE}, and becomes part of the note. The request is given after the note.
 
 Reading the request:
-- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
-- Answer it as it relates to the note, not the topic in general.
+- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "explain", "example?" refer to that text. The note's title is often the book; use it and the rest of the note for the bigger picture.
+- Answer as it relates to their notes and the book's ideas, not the topic in general. When it helps, tie the answer back to an idea or phrase already in the note.
 
-Writing the reply:
-- Short by default: a sentence or two, a short paragraph, or a few bullets. Go longer only when the request asks for it.
-- Make it read like part of the note: same language, voice and formatting habits as the text around it.
-- No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
-- For a fact check, say plainly whether it holds up and correct only what's off.
+Fit the length to the request:
+- A number, date or fact: one line, the figure first, with its year.
+- A quick question or "is this right?": one to three sentences. For a fact check, say plainly whether it holds up and correct only what's off.
+- An explainer ("explain", "why", "how", "help me understand"): the core idea first, in one or two plain sentences. Then only the parts that help it stick: a concrete example, how it connects to what they wrote, and a one-line takeaway. Under about 200 words unless they ask for more.
+- Several figures or a comparison: a small table.
+- If they ask for more depth or detail, go longer, still in short parts.
+
+Formatting, so it's easy to take in:
+- Plain, clear words. Short paragraphs of one to three sentences, with a blank line between them.
+- Bold only the one or two key terms. Use a list only for a real list or steps, five items at most.
+- In longer replies, start each part with a bold lead-in such as **Example:** or **Why it matters:**, never a heading.
+- When the reply is longer than three sentences, make its first line "Title: " and three to six words naming the idea. The reply is then shown as a card under that title. Short replies get no title.
+- No headings, callouts, horizontal rules, emoji, disclaimers, preambles, sign-offs or source lists. Cards in the note are added by the app; don't write them yourself. Don't repeat the request or their text back.
 - If figures for the year or period asked about aren't published yet, say so in a few words and give the newest published figures with their year.
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
@@ -426,6 +434,20 @@ var StreamParser = class {
     }
   }
 };
+function formatAnswer(answer, request, cards = true) {
+  const m = /^\s*Title:[ \t]*(.+?)[ \t]*(?:\n|$)/i.exec(answer);
+  const body = (m ? answer.slice(m[0].length) : answer).trim();
+  if (!cards || !body) return body;
+  const long = body.length > 450 || body.split("\n").filter((l) => l.trim()).length > 4 || /^\s*(\||```|\$\$)/m.test(body);
+  if (!m && !long) return body;
+  const title = cardTitle(m ? m[1] : request);
+  return [`> [!ai]+ ${title}`, ...body.split("\n").map((l) => l.trim() ? "> " + l : ">")].join("\n");
+}
+function cardTitle(text) {
+  let t = text.replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim().replace(/[.:;,!?]+$/, "");
+  if (t.length > 60) t = t.slice(0, 60).replace(/\s+\S*$/, "") + "\u2026";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
 function unwrapFence(text) {
   const m = /^\s*```(?:markdown|md)[ \t]*\n([\s\S]*?)\n```\s*$/.exec(text);
   return m ? m[1] : text;
@@ -525,7 +547,8 @@ var DEFAULT_SETTINGS = {
   refusalFallback: true,
   webSearch: true,
   showSources: true,
-  allowEdits: true
+  allowEdits: true,
+  cards: true
 };
 var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -561,6 +584,10 @@ var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
     }));
     new import_obsidian2.Setting(containerEl).setName("Send on Enter").setDesc("Send a tag when you finish its line. Off means only the command sends it.").addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => {
       s.autoTrigger = v;
+      await save();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("Answer cards").setDesc("Show longer answers in a card you can fold away. Short answers stay plain text either way.").addToggle((t) => t.setValue(s.cards).onChange(async (v) => {
+      s.cards = v;
       await save();
     }));
     new import_obsidian2.Setting(containerEl).setName("Let Claude edit the note").setDesc("When you ask it to fix, update or rewrite something, Claude changes that text in place. One undo reverts it.").addToggle((t) => t.setValue(s.allowEdits).onChange(async (v) => {
@@ -651,7 +678,10 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     setPillStatus(id, "Thinking");
     editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
     const context = buildContext(editor.getValue(), id, this.settings.tagWord);
-    this.ask(id, tag.request, context, file.basename).then(async (result) => ({ ...result, answer: await this.saveSvgs(result.answer, file, id) })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then((result) => this.deliver(file, id, result)).finally(() => setPillStatus(id, null));
+    this.ask(id, tag.request, context, file.basename).then(async (result) => ({
+      ...result,
+      answer: formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards)
+    })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then((result) => this.deliver(file, id, result)).finally(() => setPillStatus(id, null));
   }
   async ask(id, request, context, title) {
     const { url, headers, body } = buildRequest(this.settings, request, context, title);

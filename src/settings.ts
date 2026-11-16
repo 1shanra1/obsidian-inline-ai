@@ -12,6 +12,7 @@ export interface InlineAISettings {
   webSearch: boolean;
   showSources: boolean;
   allowEdits: boolean;
+  cards: boolean;
 }
 
 export const DEFAULT_SETTINGS: InlineAISettings = {
@@ -25,6 +26,7 @@ export const DEFAULT_SETTINGS: InlineAISettings = {
   webSearch: true,
   showSources: true,
   allowEdits: true,
+  cards: true,
 };
 
 export class InlineAISettingTab extends PluginSettingTab {
@@ -68,6 +70,11 @@ export class InlineAISettingTab extends PluginSettingTab {
       .setName("Send on Enter")
       .setDesc("Send a tag when you finish its line. Off means only the command sends it.")
       .addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => { s.autoTrigger = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Answer cards")
+      .setDesc("Show longer answers in a card you can fold away. Short answers stay plain text either way.")
+      .addToggle((t) => t.setValue(s.cards).onChange(async (v) => { s.cards = v; await save(); }));
 
     new Setting(containerEl)
       .setName("Let Claude edit the note")

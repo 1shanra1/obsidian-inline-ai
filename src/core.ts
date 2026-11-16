@@ -184,17 +184,25 @@ export function buildContext(text: string, id: string, tagWord = "@ai"): string 
   return applyChanges(text, cuts);
 }
 
-const BASE_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply takes the place of the spot where they typed the request, marked ${HERE}, and becomes part of the note. The request is given after the note.
+const BASE_PROMPT = `You are a reading companion inside the user's Obsidian note. They take notes while reading books, and they want help understanding and remembering what they read: explanations, numbers and facts, answers to their questions, examples, and links between ideas. While writing, they typed a quick request. Your reply takes the place of the spot where they typed it, marked ${HERE}, and becomes part of the note. The request is given after the note.
 
 Reading the request:
-- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
-- Answer it as it relates to the note, not the topic in general.
+- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "explain", "example?" refer to that text. The note's title is often the book; use it and the rest of the note for the bigger picture.
+- Answer as it relates to their notes and the book's ideas, not the topic in general. When it helps, tie the answer back to an idea or phrase already in the note.
 
-Writing the reply:
-- Short by default: a sentence or two, a short paragraph, or a few bullets. Go longer only when the request asks for it.
-- Make it read like part of the note: same language, voice and formatting habits as the text around it.
-- No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
-- For a fact check, say plainly whether it holds up and correct only what's off.
+Fit the length to the request:
+- A number, date or fact: one line, the figure first, with its year.
+- A quick question or "is this right?": one to three sentences. For a fact check, say plainly whether it holds up and correct only what's off.
+- An explainer ("explain", "why", "how", "help me understand"): the core idea first, in one or two plain sentences. Then only the parts that help it stick: a concrete example, how it connects to what they wrote, and a one-line takeaway. Under about 200 words unless they ask for more.
+- Several figures or a comparison: a small table.
+- If they ask for more depth or detail, go longer, still in short parts.
+
+Formatting, so it's easy to take in:
+- Plain, clear words. Short paragraphs of one to three sentences, with a blank line between them.
+- Bold only the one or two key terms. Use a list only for a real list or steps, five items at most.
+- In longer replies, start each part with a bold lead-in such as **Example:** or **Why it matters:**, never a heading.
+- When the reply is longer than three sentences, make its first line "Title: " and three to six words naming the idea. The reply is then shown as a card under that title. Short replies get no title.
+- No headings, callouts, horizontal rules, emoji, disclaimers, preambles, sign-offs or source lists. Cards in the note are added by the app; don't write them yourself. Don't repeat the request or their text back.
 - If figures for the year or period asked about aren't published yet, say so in a few words and give the newest published figures with their year.
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
@@ -585,6 +593,27 @@ export class StreamParser {
       b.input = null; // cut off mid-way; resultFrom reports it
     }
   }
+}
+
+/**
+ * Puts a longer answer in a card: a foldable Obsidian callout of type "ai",
+ * titled by Claude's "Title:" line or, failing that, by the request. Short
+ * answers stay plain text. With cards off, the title line is dropped.
+ */
+export function formatAnswer(answer: string, request: string, cards = true): string {
+  const m = /^\s*Title:[ \t]*(.+?)[ \t]*(?:\n|$)/i.exec(answer);
+  const body = (m ? answer.slice(m[0].length) : answer).trim();
+  if (!cards || !body) return body;
+  const long = body.length > 450 || body.split("\n").filter((l) => l.trim()).length > 4 || /^\s*(\||```|\$\$)/m.test(body);
+  if (!m && !long) return body;
+  const title = cardTitle(m ? m[1] : request);
+  return [`> [!ai]+ ${title}`, ...body.split("\n").map((l) => (l.trim() ? "> " + l : ">"))].join("\n");
+}
+
+function cardTitle(text: string): string {
+  let t = text.replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim().replace(/[.:;,!?]+$/, "");
+  if (t.length > 60) t = t.slice(0, 60).replace(/\s+\S*$/, "") + "…";
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 /** Drops a ```markdown fence if the model wrapped its whole answer in one. */

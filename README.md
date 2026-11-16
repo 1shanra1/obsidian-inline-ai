@@ -10,6 +10,8 @@ I should look into Europa's ocean next...
 
 You can have several tags waiting at once. Ask for text, a table, a Mermaid diagram or chart, or an image (saved as an SVG file in your attachments folder).
 
+It's tuned for taking notes while reading: ask it to explain an idea, check a claim, find a number or give an example. The answer's length fits the question. A number or a quick fact comes back as a line of plain text. An explainer comes back as a card, a quiet callout you can fold away, with the core idea first and short parts after it.
+
 Claude can also change what's already there. Write `@ai fix the dates in the paragraph above` or `@ai update these numbers to 2026`, and it edits that text in place, tidies up any blank lines left behind, and tells you what it changed in a pop-up. If the text changed while Claude was working, it changes nothing.
 
 A tag is temporary: once it's answered, it's gone, and the note keeps only your writing and Claude's answers. One undo turns an answer or an edit back into the `@ai ...` text you typed. If something goes wrong, a pop-up says what, and your tag comes back as text, so you can press Enter at its end to send it again.
@@ -50,6 +52,7 @@ Either way, open Inline AI's settings and paste your Anthropic API key.
 - **Effort:** default `medium`. Lower is faster.
 - **Tag word:** default `@ai`.
 - **Send on Enter:** on by default. The command "Inline AI: Send the tag on this line" always works too.
+- **Answer cards:** on by default. Turn it off and longer answers are plain text too.
 - **Let Claude edit the note:** on by default. Turn it off and Claude only ever adds text at the tag.
 - **Web search:** on by default. Claude searches only when a request needs facts or anything recent.
 - **Source links:** on by default. Adds a short link after facts found on the web, three at most.

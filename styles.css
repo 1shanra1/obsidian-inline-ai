@@ -62,3 +62,47 @@
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+/* Answer cards: a quiet, foldable callout for longer answers. */
+.callout[data-callout="ai"] {
+  --callout-color: var(--mono-rgb-100);
+  --callout-icon: lucide-sparkles;
+  --callout-padding: 0.85em 1.1em;
+  --callout-radius: 10px;
+  --callout-border-width: 0;
+  background-color: rgba(var(--mono-rgb-100), 0.035);
+  border-left: 3px solid rgba(var(--interactive-accent-rgb), 0.45);
+  margin: 1em 0;
+}
+
+.callout[data-callout="ai"] > .callout-title {
+  color: var(--text-muted);
+  font-size: 0.88em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  gap: 0.45em;
+}
+
+.callout[data-callout="ai"] > .callout-title .callout-icon {
+  color: rgba(var(--interactive-accent-rgb), 0.75);
+  transform: scale(0.85);
+}
+
+.callout[data-callout="ai"] > .callout-content {
+  color: var(--text-normal);
+  font-size: 0.97em;
+  line-height: 1.65;
+  padding-top: 0.35em;
+}
+
+.callout[data-callout="ai"] > .callout-content > p {
+  margin: 0.55em 0;
+}
+
+.callout[data-callout="ai"] > .callout-content strong {
+  font-weight: 600;
+}
+
+.callout[data-callout="ai"] > .callout-content table {
+  font-size: 0.95em;
+}
