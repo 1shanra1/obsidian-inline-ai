@@ -79,6 +79,30 @@ export function replacementFor(lines: string[], i: number, id: string, answer: s
   return (before.trim() !== "" ? before + "\n" : "") + block + (after.trim() !== "" ? "\n" + after : "");
 }
 
+export interface MarkerRanges {
+  hide: [number, number][]; // "%%" around a sent tag
+  tag: [number, number][]; // the sent tag's text, shown as a chip
+  pill: [number, number][]; // a thinking placeholder, drawn as the animated pill
+}
+
+/**
+ * Where the plugin's markers sit in a piece of text, so the editor can hide
+ * them. Offsets are relative to the text passed in.
+ */
+export function markerRanges(text: string, tagWord = "@ai"): MarkerRanges {
+  const out: MarkerRanges = { hide: [], tag: [], pill: [] };
+  const tagRe = new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%`, "g");
+  for (let m; (m = tagRe.exec(text)); ) {
+    const start = m.index;
+    const end = start + m[0].length;
+    out.hide.push([start, start + 2], [end - 2, end]);
+    out.tag.push([start + 2, end - 2]);
+  }
+  const pillRe = new RegExp("%%ai:[a-z0-9]+%%" + THINKING_RE, "g");
+  for (let m; (m = pillRe.exec(text)); ) out.pill.push([m.index, m.index + m[0].length]);
+  return out;
+}
+
 /** Puts the answer where the thinking line is. Returns null if that line is gone. */
 export function applyAnswer(text: string, id: string, answer: string): string | null {
   const lines = text.split("\n");

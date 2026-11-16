@@ -47,3 +47,14 @@
   .inline-ai-thinking > span { animation: none; }
   .inline-ai-thinking > span { color: var(--text-muted); background: none; }
 }
+
+/* A sent tag, while editing: the %% around it are hidden. */
+.inline-ai-tag {
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-radius: 6px;
+  padding: 0.1em 0.4em;
+  font-size: 0.9em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}

@@ -150,3 +150,18 @@ test("reads answers and errors", () => {
   assert.throws(() => core.parseResponse(502, null), /HTTP 502/);
   assert.throws(() => core.parseResponse(200, { content: [], stop_reason: "refusal" }), /declined/);
 });
+
+test("finds the markers to hide while editing", () => {
+  const line = "Some text %%@ai is this right?%% more";
+  const r = core.markerRanges(line);
+  assert.deepEqual(r.hide, [[10, 12], [30, 32]]);
+  assert.equal(line.slice(...r.tag[0]), "@ai is this right?");
+  assert.deepEqual(r.pill, []);
+
+  const pillLine = '%%ai:c54keh%%<span class="inline-ai-thinking"><span>Thinking</span></span>';
+  assert.deepEqual(core.markerRanges(pillLine).pill, [[0, pillLine.length]]);
+  const oldPill = "%%ai:c54keh%% ⏳ *AI is thinking…*";
+  assert.deepEqual(core.markerRanges(oldPill).pill, [[0, oldPill.length]]);
+  assert.deepEqual(core.markerRanges("%% my own comment %%"), { hide: [], tag: [], pill: [] });
+  assert.equal(core.markerRanges("%%@claude hi%%", "@claude").tag.length, 1);
+});

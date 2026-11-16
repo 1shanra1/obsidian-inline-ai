@@ -16,7 +16,9 @@ You can have several tags waiting at once. Ask for text, a table, a Mermaid diag
 2. It sends your request and the whole note, with the tag's spot marked, to the Anthropic API using Obsidian's own `requestUrl`, so it runs on iPad. Claude answers about the text around the tag, keeps it short, and searches the web when it needs facts.
 3. When the answer comes back, it finds the pill by its id and replaces it. It edits through the editor, so your typing isn't disturbed, and the answer still lands in the right place if you added lines above or below.
 
-The code is three files: `src/core.ts` (tag and insert logic, tested), `src/main.ts` (Obsidian glue), `src/settings.ts`.
+While you edit, the `%%` markers stay hidden: a sent tag shows as a quiet chip and a waiting answer as the pill. Put the cursor on the line to see the raw text.
+
+The code is four files: `src/core.ts` (tag and insert logic, tested), `src/main.ts` (Obsidian glue), `src/editor.ts` (hides the markers while editing), `src/settings.ts`.
 
 ## Install
 

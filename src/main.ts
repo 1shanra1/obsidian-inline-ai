@@ -1,5 +1,6 @@
 import { Editor, MarkdownView, Notice, Plugin, TFile, requestUrl } from "obsidian";
 import * as core from "./core";
+import { inlineAIExtension } from "./editor";
 import { DEFAULT_SETTINGS, InlineAISettings, InlineAISettingTab } from "./settings";
 
 export default class InlineAIPlugin extends Plugin {
@@ -9,6 +10,7 @@ export default class InlineAIPlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.addSettingTab(new InlineAISettingTab(this.app, this));
+    this.registerEditorExtension(inlineAIExtension(() => this.settings.tagWord));
 
     // Fallback: send the tag on the cursor's line from the command palette.
     this.addCommand({

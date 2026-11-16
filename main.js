@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => InlineAIPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/core.ts
 var THINKING = '<span class="inline-ai-thinking"><span>Thinking</span></span>';
@@ -63,6 +63,19 @@ function replacementFor(lines, i, id, answer) {
   if (above.trim() !== "") block = "\n" + block;
   if (below.trim() !== "") block = block + "\n";
   return (before.trim() !== "" ? before + "\n" : "") + block + (after.trim() !== "" ? "\n" + after : "");
+}
+function markerRanges(text, tagWord = "@ai") {
+  const out = { hide: [], tag: [], pill: [] };
+  const tagRe = new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%`, "g");
+  for (let m; m = tagRe.exec(text); ) {
+    const start = m.index;
+    const end = start + m[0].length;
+    out.hide.push([start, start + 2], [end - 2, end]);
+    out.tag.push([start + 2, end - 2]);
+  }
+  const pillRe = new RegExp("%%ai:[a-z0-9]+%%" + THINKING_RE, "g");
+  for (let m; m = pillRe.exec(text); ) out.pill.push([m.index, m.index + m[0].length]);
+  return out;
 }
 function applyAnswer(text, id, answer) {
   const lines = text.split("\n");
@@ -169,8 +182,64 @@ function extractSvgs(md) {
   return { md: out, svgs };
 }
 
-// src/settings.ts
+// src/editor.ts
+var import_state = require("@codemirror/state");
+var import_view = require("@codemirror/view");
 var import_obsidian = require("obsidian");
+var PillWidget = class extends import_view.WidgetType {
+  toDOM() {
+    const pill2 = document.createElement("span");
+    pill2.className = "inline-ai-thinking";
+    const label = pill2.appendChild(document.createElement("span"));
+    label.textContent = "Thinking";
+    return pill2;
+  }
+  eq() {
+    return true;
+  }
+};
+var hide = import_view.Decoration.replace({});
+var chip = import_view.Decoration.mark({ class: "inline-ai-tag" });
+var pill = import_view.Decoration.replace({ widget: new PillWidget() });
+function inlineAIExtension(getTagWord) {
+  return import_view.ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.decorations = this.build(view);
+      }
+      update(u) {
+        const modeChanged = u.startState.field(import_obsidian.editorLivePreviewField, false) !== u.state.field(import_obsidian.editorLivePreviewField, false);
+        if (u.docChanged || u.viewportChanged || u.selectionSet || modeChanged) this.decorations = this.build(u.view);
+      }
+      build(view) {
+        const builder = new import_state.RangeSetBuilder();
+        if (!view.state.field(import_obsidian.editorLivePreviewField, false)) return builder.finish();
+        const doc = view.state.doc;
+        const cursorLines = new Set(view.state.selection.ranges.flatMap((r) => [doc.lineAt(r.from).number, doc.lineAt(r.to).number]));
+        let last = 0;
+        for (const { from, to } of view.visibleRanges) {
+          for (let n = Math.max(doc.lineAt(from).number, last + 1); n <= doc.lineAt(to).number; n++) {
+            last = n;
+            const line = doc.line(n);
+            if (cursorLines.has(n) || !line.text.includes("%%")) continue;
+            const r = markerRanges(line.text, getTagWord());
+            const all = [
+              ...r.hide.map(([a, b]) => [a, b, hide]),
+              ...r.tag.map(([a, b]) => [a, b, chip]),
+              ...r.pill.map(([a, b]) => [a, b, pill])
+            ].sort((x, y) => x[0] - y[0]);
+            for (const [a, b, d] of all) builder.add(line.from + a, line.from + b, d);
+          }
+        }
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations }
+  );
+}
+
+// src/settings.ts
+var import_obsidian2 = require("obsidian");
 var DEFAULT_SETTINGS = {
   apiKey: "",
   model: "claude-opus-5-5",
@@ -182,7 +251,7 @@ var DEFAULT_SETTINGS = {
   webSearch: true,
   showSources: true
 };
-var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
+var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -192,45 +261,45 @@ var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
     const s = this.plugin.settings;
     const save = () => this.plugin.saveSettings();
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("Anthropic API key").setDesc("Stored in this plugin's data.json inside your vault, so it syncs with your vault.").addText((t) => {
+    new import_obsidian2.Setting(containerEl).setName("Anthropic API key").setDesc("Stored in this plugin's data.json inside your vault, so it syncs with your vault.").addText((t) => {
       t.inputEl.type = "password";
       t.setPlaceholder("sk-ant-...").setValue(s.apiKey).onChange(async (v) => {
         s.apiKey = v.trim();
         await save();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Model").setDesc("Any Claude model id, e.g. claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5.").addText((t) => t.setValue(s.model).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Model").setDesc("Any Claude model id, e.g. claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5.").addText((t) => t.setValue(s.model).onChange(async (v) => {
       s.model = v.trim();
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Effort").setDesc("Lower is faster and cheaper; higher thinks harder.").addDropdown((d) => {
+    new import_obsidian2.Setting(containerEl).setName("Effort").setDesc("Lower is faster and cheaper; higher thinks harder.").addDropdown((d) => {
       for (const e of ["low", "medium", "high", "xhigh", "max"]) d.addOption(e, e);
       d.setValue(s.effort).onChange(async (v) => {
         s.effort = v;
         await save();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Tag word").setDesc("What you type before a request.").addText((t) => t.setValue(s.tagWord).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Tag word").setDesc("What you type before a request.").addText((t) => t.setValue(s.tagWord).onChange(async (v) => {
       s.tagWord = v.trim() || "@ai";
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Send on Enter").setDesc("Send a tag when you finish its line. Off means only the command sends it.").addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Send on Enter").setDesc("Send a tag when you finish its line. Off means only the command sends it.").addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => {
       s.autoTrigger = v;
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Web search").setDesc("Let Claude look things up when a request needs facts or anything recent. Costs a little per search.").addToggle((t) => t.setValue(s.webSearch).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Web search").setDesc("Let Claude look things up when a request needs facts or anything recent. Costs a little per search.").addToggle((t) => t.setValue(s.webSearch).onChange(async (v) => {
       s.webSearch = v;
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Source links").setDesc("Add a short link after facts Claude found on the web (three at most).").addToggle((t) => t.setValue(s.showSources).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Source links").setDesc("Add a short link after facts Claude found on the web (three at most).").addToggle((t) => t.setValue(s.showSources).onChange(async (v) => {
       s.showSources = v;
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Max answer tokens").addText((t) => t.setValue(String(s.maxTokens)).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Max answer tokens").addText((t) => t.setValue(String(s.maxTokens)).onChange(async (v) => {
       s.maxTokens = Number(v) || DEFAULT_SETTINGS.maxTokens;
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Retry declined requests on another model").setDesc("If Claude's safety checks decline a request, Anthropic re-runs it on a fallback model.").addToggle((t) => t.setValue(s.refusalFallback).onChange(async (v) => {
+    new import_obsidian2.Setting(containerEl).setName("Retry declined requests on another model").setDesc("If Claude's safety checks decline a request, Anthropic re-runs it on a fallback model.").addToggle((t) => t.setValue(s.refusalFallback).onChange(async (v) => {
       s.refusalFallback = v;
       await save();
     }));
@@ -238,7 +307,7 @@ var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
 };
 
 // src/main.ts
-var InlineAIPlugin = class extends import_obsidian2.Plugin {
+var InlineAIPlugin = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -247,6 +316,7 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.addSettingTab(new InlineAISettingTab(this.app, this));
+    this.registerEditorExtension(inlineAIExtension(() => this.settings.tagWord));
     this.addCommand({
       id: "send-tag",
       name: "Send the tag on this line",
@@ -267,7 +337,7 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const view = leaf?.view;
-        if (view instanceof import_obsidian2.MarkdownView) this.lineCounts.set(view.editor, view.editor.lineCount());
+        if (view instanceof import_obsidian3.MarkdownView) this.lineCounts.set(view.editor, view.editor.lineCount());
       })
     );
   }
@@ -278,11 +348,11 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
     const line = editor.getLine(lineNo);
     const tag = findTag(line, this.settings.tagWord);
     if (!tag) {
-      if (fromCommand) new import_obsidian2.Notice(`No ${this.settings.tagWord} tag on this line.`);
+      if (fromCommand) new import_obsidian3.Notice(`No ${this.settings.tagWord} tag on this line.`);
       return;
     }
     if (!this.settings.apiKey) {
-      new import_obsidian2.Notice("Inline AI: add your Anthropic API key in the plugin settings.");
+      new import_obsidian3.Notice("Inline AI: add your Anthropic API key in the plugin settings.");
       return;
     }
     const id = newId();
@@ -296,7 +366,7 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
     let next = body;
     let blocks = [];
     for (let round = 0; round < 4; round++) {
-      const res = await (0, import_obsidian2.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(next), throw: false });
+      const res = await (0, import_obsidian3.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(next), throw: false });
       let json = null;
       try {
         json = res.json;
@@ -325,7 +395,7 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
   async deliver(file, id, answer) {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian2.MarkdownView) || view.file !== file || view.getMode() !== "source") continue;
+      if (!(view instanceof import_obsidian3.MarkdownView) || view.file !== file || view.getMode() !== "source") continue;
       const editor = view.editor;
       const lines = editor.getValue().split("\n");
       const i = findPlaceholder(lines, id);
@@ -339,6 +409,6 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
       found = updated !== null;
       return updated ?? text;
     });
-    if (!found) new import_obsidian2.Notice("Inline AI: an answer arrived, but its thinking line was deleted, so it was dropped.");
+    if (!found) new import_obsidian3.Notice("Inline AI: an answer arrived, but its thinking line was deleted, so it was dropped.");
   }
 };
