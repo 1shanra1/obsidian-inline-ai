@@ -55,6 +55,8 @@ Either way, open Inline AI's settings and paste your Anthropic API key.
 - **Answer cards:** on by default. Turn it off and longer answers are plain text too.
 - **Let Claude edit the note:** on by default. Turn it off and Claude only ever adds text at the tag.
 - **Web search:** on by default. Claude searches only when a request needs facts or anything recent.
+- **Searches per tag:** default 0, meaning no limit. Each search costs about a cent.
+- **Debug log:** off by default. Turn it on and each tag writes what it did (rounds, searches, any search error) to a note called "Inline AI log". It never includes your API key or your note.
 - **Source links:** on by default. Adds a short link after facts found on the web, three at most.
 - **Max answer tokens:** default 16000.
 - **Retry declined requests on another model:** on by default.

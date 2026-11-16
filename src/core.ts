@@ -13,6 +13,7 @@ export interface ApiSettings {
   refusalFallback: boolean;
   webSearch: boolean;
   allowEdits: boolean;
+  maxSearches: number; // 0 means no limit
 }
 
 /** One change the AI wants made: an exact passage of the note and its new text. */
@@ -34,7 +35,7 @@ export interface Result {
   edits: Edit[] | null; // changes elsewhere in the note, if Claude asked for any
   note?: string; // a few words on what an edit changed, shown as a pop-up
   error?: string; // why it failed; the tag comes back as plain text
-  searchFailed?: string; // a web search error code, if a search didn't work
+  searchErrors?: string[]; // error codes from web searches that didn't work
 }
 
 // The thinking pill. styles.css animates it; the answer replaces it.
@@ -272,7 +273,7 @@ export function buildRequest(s: ApiSettings, request: string, context: string, t
   const tools: unknown[] = [];
   if (s.webSearch) {
     const type = DYNAMIC_SEARCH_MODELS.test(s.model) ? "web_search_20260209" : "web_search_20250305";
-    tools.push({ type, name: "web_search", max_uses: 3 });
+    tools.push(s.maxSearches > 0 ? { type, name: "web_search", max_uses: s.maxSearches } : { type, name: "web_search" });
   }
   if (s.allowEdits) tools.push(EDIT_TOOL);
   if (tools.length) body.tools = tools;
@@ -349,10 +350,10 @@ export function parseResponse(status: number, json: any, showSources = false): s
  * text to insert. Notes whether a web search failed.
  */
 export function resultFrom(blocks: any[], stopReason: string, showSources = false): Result {
-  const failed = blocks.find((b) => b?.type === "web_search_tool_result" && b.content?.type === "web_search_tool_result_error");
-  const searchFailed: string | undefined = failed ? failed.content.error_code ?? "unknown" : undefined;
+  const errors = toolErrors(blocks);
+  const searchErrors = errors.length ? errors : undefined;
   const call = blocks.find((b) => b?.type === "tool_use" && b.name === EDIT_TOOL.name);
-  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchFailed };
+  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchErrors };
   const input = call.input;
   const ok = input && Array.isArray(input.edits) && input.edits.every((e: any) => e && typeof e.find === "string" && typeof e.replace === "string");
   if (!ok) throw new Error(stopReason === "max_tokens" ? "the edit was cut off by the max tokens setting." : "Claude's edit came back incomplete.");
@@ -360,8 +361,54 @@ export function resultFrom(blocks: any[], stopReason: string, showSources = fals
     answer: "",
     edits: input.edits.map((e: Edit) => ({ find: e.find, replace: e.replace })),
     note: typeof input.note === "string" ? input.note.trim() : "",
-    searchFailed,
+    searchErrors,
   };
+}
+
+/**
+ * Every error code reported by a server tool in the reply, such as
+ * "max_uses_exceeded". Searches can run inside the code Claude writes to
+ * filter results, where errors sit deeper, so this looks everywhere except
+ * Claude's own text.
+ */
+export function toolErrors(blocks: any[]): string[] {
+  const out = new Set<string>();
+  const walk = (x: any) => {
+    if (Array.isArray(x)) return x.forEach(walk);
+    if (!x || typeof x !== "object") return;
+    if (typeof x.error_code === "string") out.add(x.error_code);
+    for (const v of Object.values(x)) walk(v);
+  };
+  for (const b of blocks) if (b?.type !== "text" && b?.type !== "thinking") walk(b);
+  return [...out];
+}
+
+/** One line per content block, for the debug log. Never includes the note. */
+export function describeBlocks(blocks: any[]): string[] {
+  return blocks.map((b) => {
+    if (!b || typeof b !== "object") return String(b);
+    if (b.type === "text") return `text (${(b.text ?? "").length} chars${b.citations?.length ? `, ${b.citations.length} citations` : ""})`;
+    if (b.type === "server_tool_use" || b.type === "tool_use") {
+      const q = b.input?.query ? ` "${String(b.input.query).slice(0, 120)}"` : b.input?.code ? " (code)" : "";
+      return `${b.type} ${b.name ?? "?"}${q}`;
+    }
+    const errs = toolErrors([b]);
+    if (errs.length) return `${b.type}: error ${errs.join(", ")}`;
+    if (Array.isArray(b.content)) return `${b.type} (${b.content.length} items)`;
+    return b.type;
+  });
+}
+
+/** Plain words for a web search error code. */
+export function searchErrorText(code: string): string {
+  const known: Record<string, string> = {
+    max_uses_exceeded: "it hit the searches-per-tag limit in Inline AI's settings",
+    too_many_requests: "Anthropic's search was rate limited",
+    unavailable: "the search service was unavailable",
+    query_too_long: "a search query was too long",
+    invalid_input: "a search query was invalid",
+  };
+  return known[code] ?? code.replace(/_/g, " ");
 }
 
 /**
@@ -509,6 +556,7 @@ export function applyChanges(text: string, changes: Change[]): string {
 export class StreamParser {
   blocks: any[] = [];
   stopReason: string | null = null;
+  usage: any = {};
   private buf = "";
   private json = new Map<number, string>();
   private status = "";
@@ -573,8 +621,12 @@ export class StreamParser {
       case "content_block_stop":
         this.closeBlock(e.index);
         return;
+      case "message_start":
+        this.usage = { ...(e.message?.usage ?? {}) };
+        return;
       case "message_delta":
         if (e.delta?.stop_reason) this.stopReason = e.delta.stop_reason;
+        if (e.usage) this.usage = { ...this.usage, ...e.usage };
         return;
       case "error":
         throw new Error(errorMessage(0, e));

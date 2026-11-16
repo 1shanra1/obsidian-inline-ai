@@ -78,36 +78,41 @@ export default class InlineAIPlugin extends Plugin {
     setPillStatus(id, "Thinking");
     editor.replaceRange(core.dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
     const context = core.buildContext(editor.getValue(), id, this.settings.tagWord);
+    const trace: Trace = { at: new Date(), note: file.basename, request: tag.request, rounds: [] };
 
-    this.ask(id, tag.request, context, file.basename)
+    this.ask(id, tag.request, context, file.basename, trace)
       .then(async (result) => ({
         ...result,
         answer: core.formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards),
       }))
       .catch((err): core.Result => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` }))
-      .then((result) => this.deliver(file, id, result))
+      .then(async (result) => {
+        await this.deliver(file, id, result);
+        if (this.settings.debugLog) await this.writeLog(trace, result);
+      })
       .finally(() => setPillStatus(id, null));
   }
 
-  private async ask(id: string, request: string, context: string, title: string): Promise<core.Result> {
+  private async ask(id: string, request: string, context: string, title: string, trace: Trace): Promise<core.Result> {
     const { url, headers, body } = core.buildRequest(this.settings, request, context, title);
     let next = body;
     let blocks: any[] = [];
-    // A long web search can pause the turn; continue it a few times at most.
-    for (let round = 0; round < 4; round++) {
+    // A long search pauses the turn every ten or so steps; continue it.
+    for (let round = 0; round < MAX_ROUNDS; round++) {
       const reply = await this.call(url, headers, next, (status) => setPillStatus(id, status));
+      trace.rounds.push({ ...reply, blocks: core.describeBlocks(reply.blocks) });
       blocks = blocks.concat(reply.blocks);
       if (reply.stopReason === "refusal") throw new Error("Claude declined this request.");
       if (reply.stopReason !== "pause_turn") return core.resultFrom(blocks, reply.stopReason ?? "", this.settings.showSources);
       next = core.resumeBody(body, blocks);
     }
-    throw new Error("the web search ran too long. Try a narrower request.");
+    throw new Error(`the web search was still going after ${MAX_ROUNDS} rounds. Try a narrower request.`);
   }
 
   // Streams the reply, so a long search or a long think never sits silent
   // long enough to time out. If streaming can't start, falls back to one
   // ordinary request.
-  private async call(url: string, headers: Record<string, string>, body: object, onStatus: (s: string) => void): Promise<{ blocks: any[]; stopReason: string | null }> {
+  private async call(url: string, headers: Record<string, string>, body: object, onStatus: (s: string) => void): Promise<Reply> {
     const ctl = new AbortController();
     let res: Response;
     try {
@@ -126,7 +131,7 @@ export default class InlineAIPlugin extends Plugin {
     }
     if (!(res.headers.get("content-type") ?? "").includes("text/event-stream") || !res.body) {
       const json = core.checkResponse(res.status, await res.json());
-      return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null };
+      return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null, usage: json.usage, how: "fetch, not streamed" };
     }
 
     const parser = new core.StreamParser(onStatus);
@@ -157,10 +162,10 @@ export default class InlineAIPlugin extends Plugin {
     }
     const blocks = parser.finish();
     if (!parser.stopReason) throw new Error("the connection dropped before Claude finished.");
-    return { blocks, stopReason: parser.stopReason };
+    return { blocks, stopReason: parser.stopReason, usage: parser.usage, how: "streamed" };
   }
 
-  private async callOnce(url: string, headers: Record<string, string>, body: object): Promise<{ blocks: any[]; stopReason: string | null }> {
+  private async callOnce(url: string, headers: Record<string, string>, body: object): Promise<Reply> {
     const res = await requestUrl({ url, method: "POST", headers, body: JSON.stringify(body), throw: false });
     let json: any = null;
     try {
@@ -169,7 +174,7 @@ export default class InlineAIPlugin extends Plugin {
       // not JSON; checkResponse reports the status
     }
     core.checkResponse(res.status, json);
-    return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null };
+    return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null, usage: json.usage, how: "requestUrl fallback" };
   }
 
   // Saves each SVG in the answer as a file in your attachments folder and embeds it.
@@ -241,11 +246,56 @@ export default class InlineAIPlugin extends Plugin {
       const what = result.note || `Edited ${plural(plan.edited, "passage")}.`;
       new Notice(`Inline AI: ${what}${/[.!?]$/.test(what) ? "" : "."}${undoable ? " Undo reverts it." : ""}`, 8000);
     }
-    if (result.searchFailed && !plan.failure) {
-      new Notice(`Inline AI: web search didn't work this time (${result.searchFailed.replace(/_/g, " ")}), so Claude answered without it.`, 10000);
+    if (result.searchErrors?.length && !plan.failure) {
+      const why = result.searchErrors.map((c) => `${core.searchErrorText(c)} (${c})`).join("; ");
+      new Notice(`Inline AI: web search hit a problem: ${why}.`, 12000);
     }
   }
+
+  // Debug log: a note in your vault with what each tag did (rounds, searches,
+  // errors). It never holds your API key or the note's text.
+  private async writeLog(trace: Trace, result: core.Result) {
+    const searches = trace.rounds.reduce((n, r) => n + (r.usage?.server_tool_use?.web_search_requests ?? 0), 0);
+    const s = this.settings;
+    const lines = [
+      `## ${trace.at.toLocaleString()} · ${trace.note}`,
+      `- Request: ${trace.request}`,
+      `- Model: ${s.model} · effort ${s.effort} · web search ${s.webSearch ? (s.maxSearches > 0 ? `on, up to ${s.maxSearches}` : "on, no limit") : "off"}`,
+      ...trace.rounds.map(
+        (r, i) => `- Round ${i + 1} (${r.how}): stop ${r.stopReason ?? "none"} · searches ${r.usage?.server_tool_use?.web_search_requests ?? "?"}\n${r.blocks.map((b) => `    - ${b}`).join("\n")}`,
+      ),
+      `- Searches in all: ${searches}`,
+      `- Search errors: ${result.searchErrors?.join(", ") || "none"}`,
+      `- Result: ${result.error ? result.error : result.edits ? `${result.edits.length} edits` : `answer of ${result.answer.length} chars`}`,
+      "",
+    ];
+    const text = lines.join("\n") + "\n";
+    const existing = this.app.vault.getAbstractFileByPath(LOG_PATH);
+    if (existing instanceof TFile) await this.app.vault.append(existing, text);
+    else await this.app.vault.create(LOG_PATH, "# Inline AI log\n\nWhat each tag did, newest last. Turn this off in Inline AI's settings.\n\n" + text);
+    new Notice(`Inline AI: ${searches} ${searches === 1 ? "search" : "searches"} in ${plural(trace.rounds.length, "round")}. Details in "${LOG_PATH}".`, 6000);
+  }
 }
+
+interface Reply {
+  blocks: any[];
+  stopReason: string | null;
+  usage?: any;
+  how: string;
+}
+
+interface Trace {
+  at: Date;
+  note: string;
+  request: string;
+  rounds: (Omit<Reply, "blocks"> & { blocks: string[] })[];
+}
+
+// A paused search turn is continued this many times at most. Each round is
+// up to about ten search or filtering steps.
+const MAX_ROUNDS = 10;
+
+const LOG_PATH = "Inline AI log.md";
 
 // How long a streamed reply may go without sending anything before we give up.
 const IDLE_LIMIT_MS = 120_000;

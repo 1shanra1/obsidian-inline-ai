@@ -104,7 +104,7 @@ test("pulls out SVG blocks", () => {
   assert.equal(out, "Here:\n{{svg:0}}\nand\n```mermaid\ngraph TD; A-->B\n```");
 });
 
-const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true, webSearch: true, allowEdits: false };
+const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true, webSearch: true, allowEdits: false, maxSearches: 0 };
 
 test("builds the API request", () => {
   const { url, headers, body } = core.buildRequest(settings, "a table", "ctx", "The Cry for Myth");
@@ -116,7 +116,7 @@ test("builds the API request", () => {
   assert.deepEqual(body.output_config, { effort: "medium" });
   assert.equal(body.model, "claude-opus-5-5");
   assert.ok(!("temperature" in body) && !("thinking" in body));
-  assert.deepEqual(body.tools, [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }]);
+  assert.deepEqual(body.tools, [{ type: "web_search_20260209", name: "web_search" }]);
   assert.doesNotMatch(body.system as string, /edit_note/);
   assert.match((body.messages as any)[0].content, /^<note title="The Cry for Myth">\nctx\n<\/note>\n\nRequest: a table$/);
 });
@@ -201,15 +201,43 @@ test("reads an edit_note call, with its note for the pop-up", () => {
     { type: "text", text: "I'll fix that." },
     { type: "tool_use", name: "edit_note", input: { edits: [{ find: "79 moons", replace: "about 95 moons" }], note: " Fixed the count. " } },
   ];
-  assert.deepEqual(core.resultFrom(blocks, "tool_use"), { answer: "", edits: [{ find: "79 moons", replace: "about 95 moons" }], note: "Fixed the count.", searchFailed: undefined });
-  assert.deepEqual(core.resultFrom([{ type: "text", text: "Hi" }], "end_turn"), { answer: "Hi", edits: null, searchFailed: undefined });
+  assert.deepEqual(core.resultFrom(blocks, "tool_use"), { answer: "", edits: [{ find: "79 moons", replace: "about 95 moons" }], note: "Fixed the count.", searchErrors: undefined });
+  assert.deepEqual(core.resultFrom([{ type: "text", text: "Hi" }], "end_turn"), { answer: "Hi", edits: null, searchErrors: undefined });
   assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: null }], "max_tokens"), /cut off/);
   assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: { edits: [{ find: 1 }] } }], "tool_use"), /incomplete/);
 });
 
 test("notices when a web search failed", () => {
   const blocks = [{ type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "too_many_requests" } }, { type: "text", text: "From memory." }];
-  assert.equal(core.resultFrom(blocks, "end_turn").searchFailed, "too_many_requests");
+  assert.deepEqual(core.resultFrom(blocks, "end_turn").searchErrors, ["too_many_requests"]);
+});
+
+test("finds search errors nested inside code-filtered results", () => {
+  const blocks = [
+    { type: "server_tool_use", name: "code_execution", input: { code: "search()" } },
+    { type: "code_execution_tool_result", content: { type: "code_execution_result", stdout: "", content: [{ type: "web_search_tool_result_error", error_code: "max_uses_exceeded" }] } },
+    { type: "text", text: "My search stopped working." },
+  ];
+  assert.deepEqual(core.resultFrom(blocks, "end_turn").searchErrors, ["max_uses_exceeded"]);
+  assert.match(core.searchErrorText("max_uses_exceeded"), /limit/);
+  assert.equal(core.searchErrorText("some_new_code"), "some new code");
+  assert.deepEqual(core.describeBlocks(blocks), ["server_tool_use code_execution (code)", "code_execution_tool_result: error max_uses_exceeded", "text (26 chars)"]);
+});
+
+test("no search limit unless one is set", () => {
+  const capped = core.buildRequest({ ...settings, maxSearches: 5 }, "x", "y").body.tools as any[];
+  assert.equal(capped[0].max_uses, 5);
+  const free = core.buildRequest(settings, "x", "y").body.tools as any[];
+  assert.ok(!("max_uses" in free[0]));
+});
+
+test("the stream parser keeps the search count", () => {
+  const p = new core.StreamParser(() => {});
+  p.push('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n');
+  p.push('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9,"server_tool_use":{"web_search_requests":4}}}\n\n');
+  p.finish();
+  assert.equal(p.usage.server_tool_use.web_search_requests, 4);
+  assert.equal(p.usage.input_tokens, 5);
 });
 
 test("an edit changes text above, and the tag leaves no trace", () => {

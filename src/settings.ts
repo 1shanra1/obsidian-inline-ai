@@ -13,6 +13,8 @@ export interface InlineAISettings {
   showSources: boolean;
   allowEdits: boolean;
   cards: boolean;
+  maxSearches: number;
+  debugLog: boolean;
 }
 
 export const DEFAULT_SETTINGS: InlineAISettings = {
@@ -27,6 +29,8 @@ export const DEFAULT_SETTINGS: InlineAISettings = {
   showSources: true,
   allowEdits: true,
   cards: true,
+  maxSearches: 0,
+  debugLog: false,
 };
 
 export class InlineAISettingTab extends PluginSettingTab {
@@ -87,6 +91,11 @@ export class InlineAISettingTab extends PluginSettingTab {
       .addToggle((t) => t.setValue(s.webSearch).onChange(async (v) => { s.webSearch = v; await save(); }));
 
     new Setting(containerEl)
+      .setName("Searches per tag")
+      .setDesc("The most web searches one tag may run. 0 means no limit. Each search costs about a cent.")
+      .addText((t) => t.setValue(String(s.maxSearches)).onChange(async (v) => { s.maxSearches = Math.max(0, Math.floor(Number(v) || 0)); await save(); }));
+
+    new Setting(containerEl)
       .setName("Source links")
       .setDesc("Add a short link after facts Claude found on the web (three at most).")
       .addToggle((t) => t.setValue(s.showSources).onChange(async (v) => { s.showSources = v; await save(); }));
@@ -99,5 +108,10 @@ export class InlineAISettingTab extends PluginSettingTab {
       .setName("Retry declined requests on another model")
       .setDesc("If Claude's safety checks decline a request, Anthropic re-runs it on a fallback model.")
       .addToggle((t) => t.setValue(s.refusalFallback).onChange(async (v) => { s.refusalFallback = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Debug log")
+      .setDesc('Write what each tag did (searches, errors, how the reply arrived) to a note called "Inline AI log" in your vault. It never includes your API key or your note.')
+      .addToggle((t) => t.setValue(s.debugLog).onChange(async (v) => { s.debugLog = v; await save(); }));
   }
 }

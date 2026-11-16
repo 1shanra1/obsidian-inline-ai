@@ -198,7 +198,7 @@ Request: ${request}` }]
   const tools = [];
   if (s.webSearch) {
     const type = DYNAMIC_SEARCH_MODELS.test(s.model) ? "web_search_20260209" : "web_search_20250305";
-    tools.push({ type, name: "web_search", max_uses: 3 });
+    tools.push(s.maxSearches > 0 ? { type, name: "web_search", max_uses: s.maxSearches } : { type, name: "web_search" });
   }
   if (s.allowEdits) tools.push(EDIT_TOOL);
   if (tools.length) body.tools = tools;
@@ -248,10 +248,10 @@ function domainOf(url) {
   return m ? m[1] : "source";
 }
 function resultFrom(blocks, stopReason, showSources = false) {
-  const failed = blocks.find((b) => b?.type === "web_search_tool_result" && b.content?.type === "web_search_tool_result_error");
-  const searchFailed = failed ? failed.content.error_code ?? "unknown" : void 0;
+  const errors = toolErrors(blocks);
+  const searchErrors = errors.length ? errors : void 0;
   const call = blocks.find((b) => b?.type === "tool_use" && b.name === EDIT_TOOL.name);
-  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchFailed };
+  if (!call) return { answer: answerFrom(blocks, stopReason, showSources), edits: null, searchErrors };
   const input = call.input;
   const ok = input && Array.isArray(input.edits) && input.edits.every((e) => e && typeof e.find === "string" && typeof e.replace === "string");
   if (!ok) throw new Error(stopReason === "max_tokens" ? "the edit was cut off by the max tokens setting." : "Claude's edit came back incomplete.");
@@ -259,8 +259,43 @@ function resultFrom(blocks, stopReason, showSources = false) {
     answer: "",
     edits: input.edits.map((e) => ({ find: e.find, replace: e.replace })),
     note: typeof input.note === "string" ? input.note.trim() : "",
-    searchFailed
+    searchErrors
   };
+}
+function toolErrors(blocks) {
+  const out = /* @__PURE__ */ new Set();
+  const walk = (x) => {
+    if (Array.isArray(x)) return x.forEach(walk);
+    if (!x || typeof x !== "object") return;
+    if (typeof x.error_code === "string") out.add(x.error_code);
+    for (const v of Object.values(x)) walk(v);
+  };
+  for (const b of blocks) if (b?.type !== "text" && b?.type !== "thinking") walk(b);
+  return [...out];
+}
+function describeBlocks(blocks) {
+  return blocks.map((b) => {
+    if (!b || typeof b !== "object") return String(b);
+    if (b.type === "text") return `text (${(b.text ?? "").length} chars${b.citations?.length ? `, ${b.citations.length} citations` : ""})`;
+    if (b.type === "server_tool_use" || b.type === "tool_use") {
+      const q = b.input?.query ? ` "${String(b.input.query).slice(0, 120)}"` : b.input?.code ? " (code)" : "";
+      return `${b.type} ${b.name ?? "?"}${q}`;
+    }
+    const errs = toolErrors([b]);
+    if (errs.length) return `${b.type}: error ${errs.join(", ")}`;
+    if (Array.isArray(b.content)) return `${b.type} (${b.content.length} items)`;
+    return b.type;
+  });
+}
+function searchErrorText(code) {
+  const known = {
+    max_uses_exceeded: "it hit the searches-per-tag limit in Inline AI's settings",
+    too_many_requests: "Anthropic's search was rate limited",
+    unavailable: "the search service was unavailable",
+    query_too_long: "a search query was too long",
+    invalid_input: "a search query was invalid"
+  };
+  return known[code] ?? code.replace(/_/g, " ");
 }
 function locateEdits(text, edits, protectedRanges) {
   const out = [];
@@ -362,6 +397,7 @@ var StreamParser = class {
   }) {
     this.blocks = [];
     this.stopReason = null;
+    this.usage = {};
     this.buf = "";
     this.json = /* @__PURE__ */ new Map();
     this.status = "";
@@ -414,8 +450,12 @@ var StreamParser = class {
       case "content_block_stop":
         this.closeBlock(e.index);
         return;
+      case "message_start":
+        this.usage = { ...e.message?.usage ?? {} };
+        return;
       case "message_delta":
         if (e.delta?.stop_reason) this.stopReason = e.delta.stop_reason;
+        if (e.usage) this.usage = { ...this.usage, ...e.usage };
         return;
       case "error":
         throw new Error(errorMessage(0, e));
@@ -548,7 +588,9 @@ var DEFAULT_SETTINGS = {
   webSearch: true,
   showSources: true,
   allowEdits: true,
-  cards: true
+  cards: true,
+  maxSearches: 0,
+  debugLog: false
 };
 var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -598,6 +640,10 @@ var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
       s.webSearch = v;
       await save();
     }));
+    new import_obsidian2.Setting(containerEl).setName("Searches per tag").setDesc("The most web searches one tag may run. 0 means no limit. Each search costs about a cent.").addText((t) => t.setValue(String(s.maxSearches)).onChange(async (v) => {
+      s.maxSearches = Math.max(0, Math.floor(Number(v) || 0));
+      await save();
+    }));
     new import_obsidian2.Setting(containerEl).setName("Source links").setDesc("Add a short link after facts Claude found on the web (three at most).").addToggle((t) => t.setValue(s.showSources).onChange(async (v) => {
       s.showSources = v;
       await save();
@@ -608,6 +654,10 @@ var InlineAISettingTab = class extends import_obsidian2.PluginSettingTab {
     }));
     new import_obsidian2.Setting(containerEl).setName("Retry declined requests on another model").setDesc("If Claude's safety checks decline a request, Anthropic re-runs it on a fallback model.").addToggle((t) => t.setValue(s.refusalFallback).onChange(async (v) => {
       s.refusalFallback = v;
+      await save();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("Debug log").setDesc('Write what each tag did (searches, errors, how the reply arrived) to a note called "Inline AI log" in your vault. It never includes your API key or your note.').addToggle((t) => t.setValue(s.debugLog).onChange(async (v) => {
+      s.debugLog = v;
       await save();
     }));
   }
@@ -678,23 +728,28 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     setPillStatus(id, "Thinking");
     editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
     const context = buildContext(editor.getValue(), id, this.settings.tagWord);
-    this.ask(id, tag.request, context, file.basename).then(async (result) => ({
+    const trace = { at: /* @__PURE__ */ new Date(), note: file.basename, request: tag.request, rounds: [] };
+    this.ask(id, tag.request, context, file.basename, trace).then(async (result) => ({
       ...result,
       answer: formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards)
-    })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then((result) => this.deliver(file, id, result)).finally(() => setPillStatus(id, null));
+    })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then(async (result) => {
+      await this.deliver(file, id, result);
+      if (this.settings.debugLog) await this.writeLog(trace, result);
+    }).finally(() => setPillStatus(id, null));
   }
-  async ask(id, request, context, title) {
+  async ask(id, request, context, title, trace) {
     const { url, headers, body } = buildRequest(this.settings, request, context, title);
     let next = body;
     let blocks = [];
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < MAX_ROUNDS; round++) {
       const reply = await this.call(url, headers, next, (status) => setPillStatus(id, status));
+      trace.rounds.push({ ...reply, blocks: describeBlocks(reply.blocks) });
       blocks = blocks.concat(reply.blocks);
       if (reply.stopReason === "refusal") throw new Error("Claude declined this request.");
       if (reply.stopReason !== "pause_turn") return resultFrom(blocks, reply.stopReason ?? "", this.settings.showSources);
       next = resumeBody(body, blocks);
     }
-    throw new Error("the web search ran too long. Try a narrower request.");
+    throw new Error(`the web search was still going after ${MAX_ROUNDS} rounds. Try a narrower request.`);
   }
   // Streams the reply, so a long search or a long think never sits silent
   // long enough to time out. If streaming can't start, falls back to one
@@ -717,7 +772,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     }
     if (!(res.headers.get("content-type") ?? "").includes("text/event-stream") || !res.body) {
       const json = checkResponse(res.status, await res.json());
-      return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null };
+      return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null, usage: json.usage, how: "fetch, not streamed" };
     }
     const parser = new StreamParser(onStatus);
     const reader = res.body.getReader();
@@ -747,7 +802,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     }
     const blocks = parser.finish();
     if (!parser.stopReason) throw new Error("the connection dropped before Claude finished.");
-    return { blocks, stopReason: parser.stopReason };
+    return { blocks, stopReason: parser.stopReason, usage: parser.usage, how: "streamed" };
   }
   async callOnce(url, headers, body) {
     const res = await (0, import_obsidian3.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(body), throw: false });
@@ -757,7 +812,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     } catch {
     }
     checkResponse(res.status, json);
-    return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null };
+    return { blocks: json.content ?? [], stopReason: json.stop_reason ?? null, usage: json.usage, how: "requestUrl fallback" };
   }
   // Saves each SVG in the answer as a file in your attachments folder and embeds it.
   async saveSvgs(answer, file, id) {
@@ -820,11 +875,38 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
       const what = result.note || `Edited ${plural(plan.edited, "passage")}.`;
       new import_obsidian3.Notice(`Inline AI: ${what}${/[.!?]$/.test(what) ? "" : "."}${undoable ? " Undo reverts it." : ""}`, 8e3);
     }
-    if (result.searchFailed && !plan.failure) {
-      new import_obsidian3.Notice(`Inline AI: web search didn't work this time (${result.searchFailed.replace(/_/g, " ")}), so Claude answered without it.`, 1e4);
+    if (result.searchErrors?.length && !plan.failure) {
+      const why = result.searchErrors.map((c) => `${searchErrorText(c)} (${c})`).join("; ");
+      new import_obsidian3.Notice(`Inline AI: web search hit a problem: ${why}.`, 12e3);
     }
   }
+  // Debug log: a note in your vault with what each tag did (rounds, searches,
+  // errors). It never holds your API key or the note's text.
+  async writeLog(trace, result) {
+    const searches = trace.rounds.reduce((n, r) => n + (r.usage?.server_tool_use?.web_search_requests ?? 0), 0);
+    const s = this.settings;
+    const lines = [
+      `## ${trace.at.toLocaleString()} \xB7 ${trace.note}`,
+      `- Request: ${trace.request}`,
+      `- Model: ${s.model} \xB7 effort ${s.effort} \xB7 web search ${s.webSearch ? s.maxSearches > 0 ? `on, up to ${s.maxSearches}` : "on, no limit" : "off"}`,
+      ...trace.rounds.map(
+        (r, i) => `- Round ${i + 1} (${r.how}): stop ${r.stopReason ?? "none"} \xB7 searches ${r.usage?.server_tool_use?.web_search_requests ?? "?"}
+${r.blocks.map((b) => `    - ${b}`).join("\n")}`
+      ),
+      `- Searches in all: ${searches}`,
+      `- Search errors: ${result.searchErrors?.join(", ") || "none"}`,
+      `- Result: ${result.error ? result.error : result.edits ? `${result.edits.length} edits` : `answer of ${result.answer.length} chars`}`,
+      ""
+    ];
+    const text = lines.join("\n") + "\n";
+    const existing = this.app.vault.getAbstractFileByPath(LOG_PATH);
+    if (existing instanceof import_obsidian3.TFile) await this.app.vault.append(existing, text);
+    else await this.app.vault.create(LOG_PATH, "# Inline AI log\n\nWhat each tag did, newest last. Turn this off in Inline AI's settings.\n\n" + text);
+    new import_obsidian3.Notice(`Inline AI: ${searches} ${searches === 1 ? "search" : "searches"} in ${plural(trace.rounds.length, "round")}. Details in "${LOG_PATH}".`, 6e3);
+  }
 };
+var MAX_ROUNDS = 10;
+var LOG_PATH = "Inline AI log.md";
 var IDLE_LIMIT_MS = 12e4;
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
