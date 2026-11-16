@@ -7,9 +7,10 @@ export interface InlineAISettings {
   effort: string;
   tagWord: string;
   autoTrigger: boolean;
-  contextChars: number;
   maxTokens: number;
   refusalFallback: boolean;
+  webSearch: boolean;
+  showSources: boolean;
 }
 
 export const DEFAULT_SETTINGS: InlineAISettings = {
@@ -18,9 +19,10 @@ export const DEFAULT_SETTINGS: InlineAISettings = {
   effort: "medium",
   tagWord: "@ai",
   autoTrigger: true,
-  contextChars: 6000,
   maxTokens: 16000,
   refusalFallback: true,
+  webSearch: true,
+  showSources: true,
 };
 
 export class InlineAISettingTab extends PluginSettingTab {
@@ -66,9 +68,14 @@ export class InlineAISettingTab extends PluginSettingTab {
       .addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => { s.autoTrigger = v; await save(); }));
 
     new Setting(containerEl)
-      .setName("Note context (characters)")
-      .setDesc("How much of the note around the tag is sent along.")
-      .addText((t) => t.setValue(String(s.contextChars)).onChange(async (v) => { s.contextChars = Number(v) || DEFAULT_SETTINGS.contextChars; await save(); }));
+      .setName("Web search")
+      .setDesc("Let Claude look things up when a request needs facts or anything recent. Costs a little per search.")
+      .addToggle((t) => t.setValue(s.webSearch).onChange(async (v) => { s.webSearch = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Source links")
+      .setDesc("Add a short link after facts Claude found on the web (three at most).")
+      .addToggle((t) => t.setValue(s.showSources).onChange(async (v) => { s.showSources = v; await save(); }));
 
     new Setting(containerEl)
       .setName("Max answer tokens")

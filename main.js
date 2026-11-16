@@ -26,7 +26,8 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
 // src/core.ts
-var THINKING = " \u23F3 *AI is thinking\u2026*";
+var THINKING = '<span class="inline-ai-thinking"><span>Thinking</span></span>';
+var THINKING_RE = '(?:<span class="inline-ai-thinking"><span>[^<]*</span></span>| \u23F3 \\*AI is thinking\u2026\\*)?';
 var HERE = "<<<AI_TAG_HERE>>>";
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -52,7 +53,7 @@ function findPlaceholder(lines, id) {
 }
 function replacementFor(lines, i, id, answer) {
   const line = lines[i];
-  const re = new RegExp(escapeRegex(marker(id)) + "(" + escapeRegex(THINKING) + ")?");
+  const re = new RegExp(escapeRegex(marker(id)) + THINKING_RE);
   const m = re.exec(line);
   const before = line.slice(0, m.index);
   const after = line.slice(m.index + m[0].length).trimStart();
@@ -70,23 +71,31 @@ function applyAnswer(text, id, answer) {
   lines[i] = replacementFor(lines, i, id, answer);
   return lines.join("\n");
 }
-function buildContext(text, at, maxChars) {
-  const start = Math.max(0, at - Math.floor(maxChars * 0.75));
-  const end = Math.min(text.length, at + (maxChars - (at - start)));
-  return (start > 0 ? "\u2026" : "") + text.slice(start, at) + HERE + text.slice(at, end) + (end < text.length ? "\u2026" : "");
+function buildContext(text, at) {
+  const strip = (t) => t.replace(/%%ai:[a-z0-9]+%%(?:<span class="inline-ai-thinking"><span>[^<]*<\/span><\/span>)?/g, "");
+  return strip(text.slice(0, at)) + HERE + strip(text.slice(at));
 }
-var SYSTEM_PROMPT = `You write content that is inserted straight into the user's Obsidian note, at the spot where they typed an inline request while writing. The note is given with ${HERE} marking that spot.
+var SYSTEM_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply is inserted at that spot, marked ${HERE}, and becomes part of the note. The request itself sits in a comment just above the spot.
 
-Rules:
-- Output only the content to insert, in Obsidian-flavored Markdown. No preamble, no sign-off, don't repeat the request, and don't wrap the whole answer in a code block.
-- Fit the note: its language, tone and level of detail. Keep it short unless the request asks for more.
-- Tables: Markdown tables.
-- Diagrams, flowcharts, timelines, graphs and charts: a \`\`\`mermaid code block (Obsidian draws Mermaid; use xychart-beta for bar or line charts and pie for pie charts).
-- Images or illustrations: one \`\`\`svg code block holding a complete standalone SVG with xmlns and viewBox. It is saved as an image file.
-- Math: LaTeX between $ or $$.
-- When numbers come from your memory, say if they are approximate or may be out of date.`;
+Reading the request:
+- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
+- Answer it as it relates to the note, not the topic in general.
+
+Writing the reply:
+- Short by default: a sentence or two, a short paragraph, or a few bullets. Go longer only when the request asks for it.
+- Make it read like part of the note: same language, voice and formatting habits as the text around it.
+- No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
+- For a fact check, say plainly whether it holds up and correct only what's off.
+- Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
+- Math in LaTeX between $ or $$.
+- Output only the content to insert, never wrapped in a code block.
+
+Web search, when available:
+- Use it when the answer depends on facts, figures, dates or anything recent. Skip it for writing, rewording or brainstorming.
+- Use what you find without describing the search. If a figure is uncertain, say so in a few words.`;
 var FALLBACK_MODELS = /^claude-(opus-5|fable-5|mythos-5|sonnet-5-5)/;
-function buildRequest(s, request, context) {
+var DYNAMIC_SEARCH_MODELS = /^claude-(opus-5|opus-4-[678]|fable-5|mythos-5|sonnet-5|sonnet-4-6)/;
+function buildRequest(s, request, context, title = "") {
   const headers = {
     "content-type": "application/json",
     "x-api-key": s.apiKey,
@@ -98,19 +107,23 @@ function buildRequest(s, request, context) {
     max_tokens: s.maxTokens,
     system: SYSTEM_PROMPT,
     output_config: { effort: s.effort },
-    messages: [{ role: "user", content: `<note>
+    messages: [{ role: "user", content: `<note title="${title.replace(/"/g, "'")}">
 ${context}
 </note>
 
 Request: ${request}` }]
   };
+  if (s.webSearch) {
+    const type = DYNAMIC_SEARCH_MODELS.test(s.model) ? "web_search_20260209" : "web_search_20250305";
+    body.tools = [{ type, name: "web_search", max_uses: 3 }];
+  }
   if (s.refusalFallback && FALLBACK_MODELS.test(s.model)) {
     headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
     body.fallbacks = "default";
   }
   return { url: "https://api.anthropic.com/v1/messages", headers, body };
 }
-function parseResponse(status, json) {
+function checkResponse(status, json) {
   if (status >= 400 || !json || json.type === "error") {
     const msg = json?.error?.message ?? `request failed (HTTP ${status})`;
     throw new Error(msg);
@@ -118,10 +131,30 @@ function parseResponse(status, json) {
   if (json.stop_reason === "refusal") {
     throw new Error("Claude declined this request.");
   }
-  const text = (json.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  return json;
+}
+function resumeBody(body, contentSoFar) {
+  return { ...body, messages: [body.messages[0], { role: "assistant", content: contentSoFar }] };
+}
+function answerFrom(blocks, stopReason, showSources = false) {
+  const used = /* @__PURE__ */ new Set();
+  let text = "";
+  for (const b of blocks) {
+    if (b.type !== "text") continue;
+    text += b.text;
+    const c = (b.citations ?? []).find((c2) => c2.url && !used.has(c2.url));
+    if (showSources && c && used.size < 3) {
+      used.add(c.url);
+      text += ` ([${domainOf(c.url)}](${c.url.replace(/\)/g, "%29").replace(/ /g, "%20")}))`;
+    }
+  }
   let out = unwrapFence(text);
-  if (json.stop_reason === "max_tokens") out += "\n\n*(cut off: hit the max tokens setting)*";
+  if (stopReason === "max_tokens") out += "\n\n*(cut off: hit the max tokens setting)*";
   return out;
+}
+function domainOf(url) {
+  const m = /^https?:\/\/(?:www\.)?([^/?#]+)/.exec(url);
+  return m ? m[1] : "source";
 }
 function unwrapFence(text) {
   const m = /^\s*```(?:markdown|md)[ \t]*\n([\s\S]*?)\n```\s*$/.exec(text);
@@ -144,9 +177,10 @@ var DEFAULT_SETTINGS = {
   effort: "medium",
   tagWord: "@ai",
   autoTrigger: true,
-  contextChars: 6e3,
   maxTokens: 16e3,
-  refusalFallback: true
+  refusalFallback: true,
+  webSearch: true,
+  showSources: true
 };
 var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -184,8 +218,12 @@ var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
       s.autoTrigger = v;
       await save();
     }));
-    new import_obsidian.Setting(containerEl).setName("Note context (characters)").setDesc("How much of the note around the tag is sent along.").addText((t) => t.setValue(String(s.contextChars)).onChange(async (v) => {
-      s.contextChars = Number(v) || DEFAULT_SETTINGS.contextChars;
+    new import_obsidian.Setting(containerEl).setName("Web search").setDesc("Let Claude look things up when a request needs facts or anything recent. Costs a little per search.").addToggle((t) => t.setValue(s.webSearch).onChange(async (v) => {
+      s.webSearch = v;
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Source links").setDesc("Add a short link after facts Claude found on the web (three at most).").addToggle((t) => t.setValue(s.showSources).onChange(async (v) => {
+      s.showSources = v;
       await save();
     }));
     new import_obsidian.Setting(containerEl).setName("Max answer tokens").addText((t) => t.setValue(String(s.maxTokens)).onChange(async (v) => {
@@ -250,18 +288,26 @@ var InlineAIPlugin = class extends import_obsidian2.Plugin {
     const id = newId();
     editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
     const at = editor.posToOffset({ line: lineNo + 1, ch: 0 });
-    const context = buildContext(editor.getValue(), at, this.settings.contextChars);
-    this.ask(tag.request, context).then((answer) => this.saveSvgs(answer, file, id)).catch((err) => `> [!warning] Inline AI: ${err instanceof Error ? err.message : String(err)}`).then((answer) => this.deliver(file, id, answer));
+    const context = buildContext(editor.getValue(), at);
+    this.ask(tag.request, context, file.basename).then((answer) => this.saveSvgs(answer, file, id)).catch((err) => `> [!warning] Inline AI: ${err instanceof Error ? err.message : String(err)}`).then((answer) => this.deliver(file, id, answer));
   }
-  async ask(request, context) {
-    const { url, headers, body } = buildRequest(this.settings, request, context);
-    const res = await (0, import_obsidian2.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(body), throw: false });
-    let json = null;
-    try {
-      json = res.json;
-    } catch {
+  async ask(request, context, title) {
+    const { url, headers, body } = buildRequest(this.settings, request, context, title);
+    let next = body;
+    let blocks = [];
+    for (let round = 0; round < 4; round++) {
+      const res = await (0, import_obsidian2.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(next), throw: false });
+      let json = null;
+      try {
+        json = res.json;
+      } catch {
+      }
+      checkResponse(res.status, json);
+      blocks = blocks.concat(json.content ?? []);
+      if (json.stop_reason !== "pause_turn") return answerFrom(blocks, json.stop_reason, this.settings.showSources);
+      next = resumeBody(body, blocks);
     }
-    return parseResponse(res.status, json);
+    throw new Error("the web search ran too long. Try a narrower request.");
   }
   // Saves each SVG in the answer as a file in your attachments folder and embeds it.
   async saveSvgs(answer, file, id) {

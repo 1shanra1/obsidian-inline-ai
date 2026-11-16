@@ -1,0 +1,49 @@
+/* The "thinking" pill shown while Claude works on a tag. */
+.inline-ai-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.2em 0.75em 0.2em 0.6em;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: 0.85em;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+/* Pulsing dot */
+.inline-ai-thinking::before {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  animation: inline-ai-pulse 1.4s ease-in-out infinite;
+}
+
+/* Light sweeping across the word */
+.inline-ai-thinking > span {
+  background: linear-gradient(90deg, var(--text-faint) 25%, var(--text-normal) 50%, var(--text-faint) 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: inline-ai-shimmer 1.8s linear infinite;
+}
+
+@keyframes inline-ai-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+@keyframes inline-ai-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-ai-thinking::before,
+  .inline-ai-thinking > span { animation: none; }
+  .inline-ai-thinking > span { color: var(--text-muted); background: none; }
+}

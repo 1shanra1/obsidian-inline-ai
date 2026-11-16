@@ -11,9 +11,13 @@ export interface ApiSettings {
   effort: string;
   maxTokens: number;
   refusalFallback: boolean;
+  webSearch: boolean;
 }
 
-const THINKING = " ⏳ *AI is thinking…*";
+// The thinking pill. styles.css animates it; the answer replaces it.
+const THINKING = '<span class="inline-ai-thinking"><span>Thinking</span></span>';
+// Also matches the plain-text placeholder from 0.1.0.
+const THINKING_RE = '(?:<span class="inline-ai-thinking"><span>[^<]*</span></span>| ⏳ \\*AI is thinking…\\*)?';
 const HERE = "<<<AI_TAG_HERE>>>";
 
 function escapeRegex(s: string): string {
@@ -61,7 +65,7 @@ export function findPlaceholder(lines: string[], id: string): number {
  */
 export function replacementFor(lines: string[], i: number, id: string, answer: string): string {
   const line = lines[i];
-  const re = new RegExp(escapeRegex(marker(id)) + "(" + escapeRegex(THINKING) + ")?");
+  const re = new RegExp(escapeRegex(marker(id)) + THINKING_RE);
   const m = re.exec(line)!;
   const before = line.slice(0, m.index);
   const after = line.slice(m.index + m[0].length).trimStart();
@@ -84,28 +88,41 @@ export function applyAnswer(text: string, id: string, answer: string): string | 
   return lines.join("\n");
 }
 
-/** The note around the tag, with the tag's spot marked, cut to about maxChars. */
-export function buildContext(text: string, at: number, maxChars: number): string {
-  const start = Math.max(0, at - Math.floor(maxChars * 0.75));
-  const end = Math.min(text.length, at + (maxChars - (at - start)));
-  return (start > 0 ? "…" : "") + text.slice(start, at) + HERE + text.slice(at, end) + (end < text.length ? "…" : "");
+/**
+ * The whole note with the tag's spot marked. Other tags still thinking are
+ * left out, so they don't distract.
+ */
+export function buildContext(text: string, at: number): string {
+  const strip = (t: string) => t.replace(/%%ai:[a-z0-9]+%%(?:<span class="inline-ai-thinking"><span>[^<]*<\/span><\/span>)?/g, "");
+  return strip(text.slice(0, at)) + HERE + strip(text.slice(at));
 }
 
-export const SYSTEM_PROMPT = `You write content that is inserted straight into the user's Obsidian note, at the spot where they typed an inline request while writing. The note is given with ${HERE} marking that spot.
+export const SYSTEM_PROMPT = `You are a writing partner inside the user's Obsidian note. While writing, they typed a quick inline request. Your reply is inserted at that spot, marked ${HERE}, and becomes part of the note. The request itself sits in a comment just above the spot.
 
-Rules:
-- Output only the content to insert, in Obsidian-flavored Markdown. No preamble, no sign-off, don't repeat the request, and don't wrap the whole answer in a code block.
-- Fit the note: its language, tone and level of detail. Keep it short unless the request asks for more.
-- Tables: Markdown tables.
-- Diagrams, flowcharts, timelines, graphs and charts: a \`\`\`mermaid code block (Obsidian draws Mermaid; use xychart-beta for bar or line charts and pie for pie charts).
-- Images or illustrations: one \`\`\`svg code block holding a complete standalone SVG with xmlns and viewBox. It is saved as an image file.
-- Math: LaTeX between $ or $$.
-- When numbers come from your memory, say if they are approximate or may be out of date.`;
+Reading the request:
+- It is about the text around the spot, above all the paragraph just before it. "Check this", "is this right?", "expand", "example?" refer to that text. Use the rest of the note and its title for the bigger picture.
+- Answer it as it relates to the note, not the topic in general.
+
+Writing the reply:
+- Short by default: a sentence or two, a short paragraph, or a few bullets. Go longer only when the request asks for it.
+- Make it read like part of the note: same language, voice and formatting habits as the text around it.
+- No headings, callouts, warning boxes, disclaimers, preambles, sign-offs or source lists unless asked. Don't repeat the request or the user's text back.
+- For a fact check, say plainly whether it holds up and correct only what's off.
+- Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
+- Math in LaTeX between $ or $$.
+- Output only the content to insert, never wrapped in a code block.
+
+Web search, when available:
+- Use it when the answer depends on facts, figures, dates or anything recent. Skip it for writing, rewording or brainstorming.
+- Use what you find without describing the search. If a figure is uncertain, say so in a few words.`;
 
 // Models that accept server-side refusal fallbacks.
 const FALLBACK_MODELS = /^claude-(opus-5|fable-5|mythos-5|sonnet-5-5)/;
 
-export function buildRequest(s: ApiSettings, request: string, context: string) {
+// Models whose web search filters results itself (the newer tool version).
+const DYNAMIC_SEARCH_MODELS = /^claude-(opus-5|opus-4-[678]|fable-5|mythos-5|sonnet-5|sonnet-4-6)/;
+
+export function buildRequest(s: ApiSettings, request: string, context: string, title = "") {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "x-api-key": s.apiKey,
@@ -117,8 +134,12 @@ export function buildRequest(s: ApiSettings, request: string, context: string) {
     max_tokens: s.maxTokens,
     system: SYSTEM_PROMPT,
     output_config: { effort: s.effort },
-    messages: [{ role: "user", content: `<note>\n${context}\n</note>\n\nRequest: ${request}` }],
+    messages: [{ role: "user", content: `<note title="${title.replace(/"/g, "'")}">\n${context}\n</note>\n\nRequest: ${request}` }],
   };
+  if (s.webSearch) {
+    const type = DYNAMIC_SEARCH_MODELS.test(s.model) ? "web_search_20260209" : "web_search_20250305";
+    body.tools = [{ type, name: "web_search", max_uses: 3 }];
+  }
   if (s.refusalFallback && FALLBACK_MODELS.test(s.model)) {
     headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
     body.fallbacks = "default";
@@ -126,8 +147,8 @@ export function buildRequest(s: ApiSettings, request: string, context: string) {
   return { url: "https://api.anthropic.com/v1/messages", headers, body };
 }
 
-/** Turns the API's reply into Markdown, or throws an error with a readable message. */
-export function parseResponse(status: number, json: any): string {
+/** Throws a readable error if the API call failed or Claude declined. */
+export function checkResponse(status: number, json: any): any {
   if (status >= 400 || !json || json.type === "error") {
     const msg = json?.error?.message ?? `request failed (HTTP ${status})`;
     throw new Error(msg);
@@ -135,13 +156,48 @@ export function parseResponse(status: number, json: any): string {
   if (json.stop_reason === "refusal") {
     throw new Error("Claude declined this request.");
   }
-  const text = (json.content ?? [])
-    .filter((b: any) => b.type === "text")
-    .map((b: any) => b.text)
-    .join("");
+  return json;
+}
+
+/**
+ * A long web search can pause the turn. This is the next request: the same
+ * one, plus everything Claude has produced so far, so the server picks up
+ * where it stopped.
+ */
+export function resumeBody(body: Record<string, any>, contentSoFar: unknown[]): Record<string, any> {
+  return { ...body, messages: [body.messages[0], { role: "assistant", content: contentSoFar }] };
+}
+
+/**
+ * The Markdown to insert, from the reply's content blocks. With showSources,
+ * a cited passage gets a short link to its source (at most three in all).
+ */
+export function answerFrom(blocks: any[], stopReason: string, showSources = false): string {
+  const used = new Set<string>();
+  let text = "";
+  for (const b of blocks) {
+    if (b.type !== "text") continue;
+    text += b.text;
+    const c = (b.citations ?? []).find((c: any) => c.url && !used.has(c.url));
+    if (showSources && c && used.size < 3) {
+      used.add(c.url);
+      text += ` ([${domainOf(c.url)}](${c.url.replace(/\)/g, "%29").replace(/ /g, "%20")}))`;
+    }
+  }
   let out = unwrapFence(text);
-  if (json.stop_reason === "max_tokens") out += "\n\n*(cut off: hit the max tokens setting)*";
+  if (stopReason === "max_tokens") out += "\n\n*(cut off: hit the max tokens setting)*";
   return out;
+}
+
+function domainOf(url: string): string {
+  const m = /^https?:\/\/(?:www\.)?([^/?#]+)/.exec(url);
+  return m ? m[1] : "source";
+}
+
+/** One reply, start to finish: check it, then turn it into Markdown. */
+export function parseResponse(status: number, json: any, showSources = false): string {
+  checkResponse(status, json);
+  return answerFrom(json.content ?? [], json.stop_reason, showSources);
 }
 
 /** Drops a ```markdown fence if the model wrapped its whole answer in one. */

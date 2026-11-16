@@ -30,7 +30,7 @@ test("supports a custom tag word", () => {
 
 test("sending hides the tag and adds a thinking line", () => {
   const out = send("Notes\nMoons. @ai a table\nmore", 1, "abc123");
-  assert.equal(out, "Notes\nMoons. %%@ai a table%%\n%%ai:abc123%% ⏳ *AI is thinking…*\nmore");
+  assert.equal(out, 'Notes\nMoons. %%@ai a table%%\n%%ai:abc123%%<span class="inline-ai-thinking"><span>Thinking</span></span>\nmore');
   assert.equal(core.findTag(out.split("\n")[1]), null);
 });
 
@@ -61,7 +61,7 @@ test("several tags in flight resolve in any order", () => {
 
 test("text typed on the thinking line is kept", () => {
   let text = send("x\n@ai hi\n", 1, "k");
-  text = text.replace("*AI is thinking…*", "*AI is thinking…* oops typed here");
+  text = text.replace("</span></span>", "</span></span> oops typed here");
   const out = core.applyAnswer(text, "k", "Hello")!;
   assert.equal(out, "x\n%%@ai hi%%\n\nHello\n\noops typed here\n");
 });
@@ -71,11 +71,15 @@ test("an answer whose thinking line was deleted is dropped", () => {
   assert.equal(core.applyAnswer(text, "gone", "Hello"), null);
 });
 
-test("context marks the tag spot and is trimmed", () => {
-  const text = "a".repeat(100) + "b".repeat(100);
-  const ctx = core.buildContext(text, 100, 40);
-  assert.equal(ctx, "…" + "a".repeat(30) + "<<<AI_TAG_HERE>>>" + "b".repeat(10) + "…");
-  assert.equal(core.buildContext("short", 5, 6000), "short<<<AI_TAG_HERE>>>");
+test("context is the whole note with the tag's spot marked", () => {
+  const text = "# Myth\nPara one.\n%%@ai check this%%\n%%ai:k1%%<span class=\"inline-ai-thinking\"><span>Thinking</span></span>\nAfter.";
+  const at = text.indexOf("%%ai:k1");
+  assert.equal(core.buildContext(text, at), "# Myth\nPara one.\n%%@ai check this%%\n<<<AI_TAG_HERE>>>\nAfter.");
+});
+
+test("a placeholder from 0.1.0 is still replaced cleanly", () => {
+  const out = core.applyAnswer("x\n%%@ai hi%%\n%%ai:old%% ⏳ *AI is thinking…*\n", "old", "Hello");
+  assert.equal(out, "x\n%%@ai hi%%\n\nHello\n");
 });
 
 test("pulls out SVG blocks", () => {
@@ -85,10 +89,10 @@ test("pulls out SVG blocks", () => {
   assert.equal(out, "Here:\n{{svg:0}}\nand\n```mermaid\ngraph TD; A-->B\n```");
 });
 
-const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true };
+const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true, webSearch: true };
 
 test("builds the API request", () => {
-  const { url, headers, body } = core.buildRequest(settings, "a table", "ctx");
+  const { url, headers, body } = core.buildRequest(settings, "a table", "ctx", "The Cry for Myth");
   assert.equal(url, "https://api.anthropic.com/v1/messages");
   assert.equal(headers["anthropic-version"], "2026-10-21");
   assert.equal(headers["x-api-key"], "test-key");
@@ -97,6 +101,38 @@ test("builds the API request", () => {
   assert.deepEqual(body.output_config, { effort: "medium" });
   assert.equal(body.model, "claude-opus-5-5");
   assert.ok(!("temperature" in body) && !("thinking" in body));
+  assert.deepEqual(body.tools, [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }]);
+  assert.match((body.messages as any)[0].content, /^<note title="The Cry for Myth">\nctx\n<\/note>\n\nRequest: a table$/);
+});
+
+test("web search can be off, and older models get the basic search tool", () => {
+  assert.equal(core.buildRequest({ ...settings, webSearch: false }, "x", "y").body.tools, undefined);
+  const haiku = core.buildRequest({ ...settings, model: "claude-haiku-5-5" }, "x", "y").body.tools as any[];
+  assert.equal(haiku[0].type, "web_search_20250305");
+});
+
+test("short source links after cited facts, at most three", () => {
+  const cite = (url: string) => ({ type: "web_search_result_location", url, cited_text: "..." });
+  const blocks = [
+    { type: "server_tool_use", name: "web_search" },
+    { type: "web_search_tool_result", content: [] },
+    { type: "text", text: "About 81% say yes", citations: [cite("https://news.gallup.com/poll/1")] },
+    { type: "text", text: ", and 29% have no religion", citations: [cite("https://www.pewresearch.org/a (b)")] },
+    { type: "text", text: "." },
+  ];
+  assert.equal(
+    core.answerFrom(blocks, "end_turn", true),
+    "About 81% say yes ([news.gallup.com](https://news.gallup.com/poll/1)), and 29% have no religion ([pewresearch.org](https://www.pewresearch.org/a%20(b%29))."
+  );
+  assert.equal(core.answerFrom(blocks, "end_turn", false), "About 81% say yes, and 29% have no religion.");
+});
+
+test("a paused search turn resumes with everything so far", () => {
+  const { body } = core.buildRequest(settings, "x", "y");
+  const next = core.resumeBody(body, [{ type: "server_tool_use" }]);
+  assert.equal(next.messages.length, 2);
+  assert.deepEqual(next.messages[1], { role: "assistant", content: [{ type: "server_tool_use" }] });
+  assert.equal(next.model, body.model);
 });
 
 test("leaves the fallback off for models without it", () => {

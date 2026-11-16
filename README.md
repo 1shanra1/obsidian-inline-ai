@@ -12,9 +12,9 @@ You can have several tags waiting at once. Ask for text, a table, a Mermaid diag
 
 ## How it works
 
-1. When you finish a line with a tag, the plugin hides the tag in a comment (`%%@ai ...%%`) and adds a "thinking" line under it with a hidden id.
-2. It sends your request and the text around it to the Anthropic API, using Obsidian's own `requestUrl`, so it runs on iPad.
-3. When the answer comes back, it finds the thinking line by its id and replaces it. It edits through the editor, so your typing isn't disturbed, and the answer still lands in the right place if you added lines above or below.
+1. When you finish a line with a tag, the plugin hides the tag in a comment (`%%@ai ...%%`) and puts an animated "Thinking" pill under it, tagged with a hidden id.
+2. It sends your request and the whole note, with the tag's spot marked, to the Anthropic API using Obsidian's own `requestUrl`, so it runs on iPad. Claude answers about the text around the tag, keeps it short, and searches the web when it needs facts.
+3. When the answer comes back, it finds the pill by its id and replaces it. It edits through the editor, so your typing isn't disturbed, and the answer still lands in the right place if you added lines above or below.
 
 The code is three files: `src/core.ts` (tag and insert logic, tested), `src/main.ts` (Obsidian glue), `src/settings.ts`.
 
@@ -28,9 +28,9 @@ The code is three files: `src/core.ts` (tag and insert logic, tested), `src/main
 
 BRAT installs the latest GitHub release and can update it later.
 
-**By copying files:** the plugin is two files, `main.js` and `manifest.json`. They go in `<your vault>/.obsidian/plugins/inline-ai/`.
+**By copying files:** the plugin is three files, `main.js`, `manifest.json` and `styles.css`. They go in `<your vault>/.obsidian/plugins/inline-ai/`.
 
-- **Vault in iCloud, with a Mac:** copy the two files into that folder on your Mac. iCloud syncs them to your iPad.
+- **Vault in iCloud, with a Mac:** copy the three files into that folder on your Mac. iCloud syncs them to your iPad.
 - **Obsidian Sync:** copy them in on any computer, and turn on "Installed community plugins" in Sync settings on both devices.
 
 Then turn on Inline AI under Community plugins.
@@ -44,7 +44,8 @@ Either way, open Inline AI's settings and paste your Anthropic API key.
 - **Effort:** default `medium`. Lower is faster.
 - **Tag word:** default `@ai`.
 - **Send on Enter:** on by default. The command "Inline AI: Send the tag on this line" always works too.
-- **Note context:** how many characters around the tag are sent (default 6000).
+- **Web search:** on by default. Claude searches only when a request needs facts or anything recent.
+- **Source links:** on by default. Adds a short link after facts found on the web, three at most.
 - **Max answer tokens:** default 16000.
 - **Retry declined requests on another model:** on by default.
 

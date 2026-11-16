@@ -60,24 +60,33 @@ export default class InlineAIPlugin extends Plugin {
     editor.replaceRange(core.dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
 
     const at = editor.posToOffset({ line: lineNo + 1, ch: 0 });
-    const context = core.buildContext(editor.getValue(), at, this.settings.contextChars);
+    const context = core.buildContext(editor.getValue(), at);
 
-    this.ask(tag.request, context)
+    this.ask(tag.request, context, file.basename)
       .then((answer) => this.saveSvgs(answer, file, id))
       .catch((err) => `> [!warning] Inline AI: ${err instanceof Error ? err.message : String(err)}`)
       .then((answer) => this.deliver(file, id, answer));
   }
 
-  private async ask(request: string, context: string): Promise<string> {
-    const { url, headers, body } = core.buildRequest(this.settings, request, context);
-    const res = await requestUrl({ url, method: "POST", headers, body: JSON.stringify(body), throw: false });
-    let json: unknown = null;
-    try {
-      json = res.json;
-    } catch {
-      // not JSON; parseResponse reports the status
+  private async ask(request: string, context: string, title: string): Promise<string> {
+    const { url, headers, body } = core.buildRequest(this.settings, request, context, title);
+    let next = body;
+    let blocks: unknown[] = [];
+    // A long web search can pause the turn; continue it a few times at most.
+    for (let round = 0; round < 4; round++) {
+      const res = await requestUrl({ url, method: "POST", headers, body: JSON.stringify(next), throw: false });
+      let json: any = null;
+      try {
+        json = res.json;
+      } catch {
+        // not JSON; checkResponse reports the status
+      }
+      core.checkResponse(res.status, json);
+      blocks = blocks.concat(json.content ?? []);
+      if (json.stop_reason !== "pause_turn") return core.answerFrom(blocks, json.stop_reason, this.settings.showSources);
+      next = core.resumeBody(body, blocks);
     }
-    return core.parseResponse(res.status, json);
+    throw new Error("the web search ran too long. Try a narrower request.");
   }
 
   // Saves each SVG in the answer as a file in your attachments folder and embeds it.
