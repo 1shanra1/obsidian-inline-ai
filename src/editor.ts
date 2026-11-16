@@ -8,22 +8,38 @@ import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, WidgetTy
 import { editorLivePreviewField } from "obsidian";
 import { markerRanges } from "./core";
 
+// What each tag in flight is doing now ("Searching the web", "Writing"), by id.
+const statuses = new Map<string, string>();
+
+/** Updates the label on a tag's pill, wherever it's showing. */
+export function setPillStatus(id: string, status: string | null) {
+  if (status === null) statuses.delete(id);
+  else statuses.set(id, status);
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(`.inline-ai-thinking[data-ai-id="${id}"] > span`))) {
+    el.textContent = status ?? "Thinking";
+  }
+}
+
 class PillWidget extends WidgetType {
+  constructor(readonly id: string) {
+    super();
+  }
   toDOM(): HTMLElement {
     const pill = document.createElement("span");
     pill.className = "inline-ai-thinking";
+    pill.dataset.aiId = this.id;
     const label = pill.appendChild(document.createElement("span"));
-    label.textContent = "Thinking";
+    label.textContent = statuses.get(this.id) ?? "Thinking";
     return pill;
   }
-  eq(): boolean {
-    return true;
+  eq(other: PillWidget): boolean {
+    return other.id === this.id;
   }
 }
 
 const hide = Decoration.replace({});
 const chip = Decoration.mark({ class: "inline-ai-tag" });
-const pill = Decoration.replace({ widget: new PillWidget() });
+const pill = (id: string) => Decoration.replace({ widget: new PillWidget(id) });
 
 export function inlineAIExtension(getTagWord: () => string) {
   return ViewPlugin.fromClass(
@@ -52,7 +68,7 @@ export function inlineAIExtension(getTagWord: () => string) {
             const all: [number, number, Decoration][] = [
               ...r.hide.map(([a, b]) => [a, b, hide] as [number, number, Decoration]),
               ...r.tag.map(([a, b]) => [a, b, chip] as [number, number, Decoration]),
-              ...r.pill.map(([a, b]) => [a, b, pill] as [number, number, Decoration]),
+              ...r.pill.map(([a, b]) => [a, b, pill(/%%ai:([a-z0-9]+)%%/.exec(line.text.slice(a, b))?.[1] ?? "")] as [number, number, Decoration]),
             ].sort((x, y) => x[0] - y[0]);
             for (const [a, b, d] of all) builder.add(line.from + a, line.from + b, d);
           }

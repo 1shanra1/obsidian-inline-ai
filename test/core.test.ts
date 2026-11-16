@@ -89,7 +89,7 @@ test("pulls out SVG blocks", () => {
   assert.equal(out, "Here:\n{{svg:0}}\nand\n```mermaid\ngraph TD; A-->B\n```");
 });
 
-const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true, webSearch: true };
+const settings = { apiKey: "test-key", model: "claude-opus-5-5", effort: "medium", maxTokens: 16000, refusalFallback: true, webSearch: true, allowEdits: false };
 
 test("builds the API request", () => {
   const { url, headers, body } = core.buildRequest(settings, "a table", "ctx", "The Cry for Myth");
@@ -102,6 +102,7 @@ test("builds the API request", () => {
   assert.equal(body.model, "claude-opus-5-5");
   assert.ok(!("temperature" in body) && !("thinking" in body));
   assert.deepEqual(body.tools, [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }]);
+  assert.doesNotMatch(body.system as string, /edit_note/);
   assert.match((body.messages as any)[0].content, /^<note title="The Cry for Myth">\nctx\n<\/note>\n\nRequest: a table$/);
 });
 
@@ -146,7 +147,9 @@ test("reads answers and errors", () => {
   assert.equal(core.parseResponse(200, ok), "Hi there");
   assert.equal(core.parseResponse(200, { content: [{ type: "text", text: "```markdown\n| a |\n```" }] }), "| a |");
   assert.match(core.parseResponse(200, { content: [{ type: "text", text: "long" }], stop_reason: "max_tokens" }), /cut off/);
-  assert.throws(() => core.parseResponse(401, { type: "error", error: { message: "invalid x-api-key" } }), /invalid x-api-key/);
+  assert.throws(() => core.parseResponse(401, { type: "error", error: { message: "invalid x-api-key" } }), /didn't accept the API key/);
+  assert.throws(() => core.parseResponse(529, { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }), /overloaded/);
+  assert.throws(() => core.parseResponse(400, { type: "error", error: { message: "max_tokens: too big" } }), /max_tokens: too big/);
   assert.throws(() => core.parseResponse(502, null), /HTTP 502/);
   assert.throws(() => core.parseResponse(200, { content: [], stop_reason: "refusal" }), /declined/);
 });
@@ -164,4 +167,163 @@ test("finds the markers to hide while editing", () => {
   assert.deepEqual(core.markerRanges(oldPill).pill, [[0, oldPill.length]]);
   assert.deepEqual(core.markerRanges("%% my own comment %%"), { hide: [], tag: [], pill: [] });
   assert.equal(core.markerRanges("%%@claude hi%%", "@claude").tag.length, 1);
+});
+
+// ---- 0.3.0: edits and streaming
+
+const noteWithTag = (id: string) =>
+  "# Moons\nEuropa has 79 moons around it.\nIo is volcanic.\n%%@ai fix the moon count%%\n%%ai:" + id +
+  '%%<span class="inline-ai-thinking"><span>Thinking</span></span>\nMore notes.';
+
+test("the edit tool is offered when edits are on", () => {
+  const { body } = core.buildRequest({ ...settings, allowEdits: true }, "x", "y");
+  const tools = body.tools as any[];
+  assert.equal(tools[1].name, "edit_note");
+  assert.match(body.system as string, /edit_note/);
+  assert.equal((core.buildRequest({ ...settings, allowEdits: true, webSearch: false }, "x", "y").body.tools as any[]).length, 1);
+});
+
+test("reads an edit_note call, ignoring any text around it", () => {
+  const blocks = [
+    { type: "text", text: "I'll fix that." },
+    { type: "tool_use", name: "edit_note", input: { edits: [{ find: "79 moons", replace: "about 95 moons" }], note: " Fixed the count. " } },
+  ];
+  assert.deepEqual(core.resultFrom(blocks, "tool_use"), { answer: "Fixed the count.", edits: [{ find: "79 moons", replace: "about 95 moons" }] });
+  assert.deepEqual(core.resultFrom([{ type: "text", text: "Hi" }], "end_turn"), { answer: "Hi", edits: null });
+  assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: null }], "max_tokens"), /cut off/);
+  assert.throws(() => core.resultFrom([{ type: "tool_use", name: "edit_note", input: { edits: [{ find: 1 }] } }], "tool_use"), /incomplete/);
+});
+
+test("an edit changes text above the tag and the note lands at the tag", () => {
+  const text = noteWithTag("e1");
+  const plan = core.planChanges(text, "e1", { answer: "Fixed the count.", edits: [{ find: "has 79 moons around it", replace: "is a moon of Jupiter" }] })!;
+  assert.equal(plan.edited, 1);
+  assert.equal(
+    core.applyChanges(text, plan.changes),
+    "# Moons\nEuropa is a moon of Jupiter.\nIo is volcanic.\n%%@ai fix the moon count%%\n\nFixed the count.\n\nMore notes.",
+  );
+});
+
+test("an edit with no note removes the thinking line", () => {
+  const text = noteWithTag("e2");
+  const plan = core.planChanges(text, "e2", { answer: "", edits: [{ find: "Io is volcanic.", replace: "Io is the most volcanic body known." }] })!;
+  assert.equal(
+    core.applyChanges(text, plan.changes),
+    "# Moons\nEuropa has 79 moons around it.\nIo is the most volcanic body known.\n%%@ai fix the moon count%%\nMore notes.",
+  );
+  // last line of the note
+  const last = "Alpha\n%%@ai x%%\n%%ai:z%%<span class=\"inline-ai-thinking\"><span>Thinking</span></span>";
+  assert.equal(core.applyChanges(last, core.planChanges(last, "z", { answer: "", edits: [{ find: "Alpha", replace: "Beta" }] })!.changes), "Beta\n%%@ai x%%");
+});
+
+test("several edits apply together, in any order", () => {
+  const text = noteWithTag("e3");
+  const plan = core.planChanges(text, "e3", {
+    answer: "",
+    edits: [
+      { find: "More notes.", replace: "More notes!" },
+      { find: "# Moons", replace: "# Moons of the solar system" },
+    ],
+  })!;
+  const out = core.applyChanges(text, plan.changes);
+  assert.ok(out.startsWith("# Moons of the solar system\n") && out.endsWith("\nMore notes!"));
+  assert.equal(plan.edited, 2);
+});
+
+test("edits that can't be placed safely change nothing and leave a warning", () => {
+  const text = noteWithTag("e4");
+  const check = (edits: core.Edit[], reason: RegExp) => {
+    const plan = core.planChanges(text, "e4", { answer: "note", edits })!;
+    assert.equal(plan.edited, 0);
+    assert.equal(plan.changes.length, 1);
+    const out = core.applyChanges(text, plan.changes);
+    assert.match(out, reason);
+    assert.match(out, /\[!warning\] Inline AI couldn't make the edit/);
+    assert.ok(out.includes("Europa has 79 moons around it.\nIo is volcanic."), "note text untouched");
+  };
+  check([{ find: "Ganymede", replace: "x" }], /isn't in the note/);
+  check([{ find: "o", replace: "0" }], /more than once/);
+  check([{ find: "fix the moon count", replace: "x" }], /request itself/);
+  check([{ find: "volcanic.\n%%@ai", replace: "x" }], /request itself/);
+  check([{ find: "<<<AI_TAG_HERE>>>", replace: "x" }], /request itself/);
+  check([{ find: "has 79", replace: "a" }, { find: "79 moons", replace: "b" }], /overlapped/);
+  check([{ find: "", replace: "x" }], /didn't say/);
+});
+
+test("an edit for a deleted thinking line is dropped", () => {
+  assert.equal(core.planChanges("a\nb", "nope", { answer: "", edits: [{ find: "a", replace: "c" }] }), null);
+});
+
+// Splits a list of events into SSE text, then feeds it in awkward chunks.
+function sse(events: object[], chunk = 7): string[] {
+  const all = events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+  const out: string[] = [];
+  for (let i = 0; i < all.length; i += chunk) out.push(all.slice(i, i + chunk));
+  return out;
+}
+
+test("rebuilds a streamed reply with search, citations and an edit", () => {
+  const statuses: string[] = [];
+  const p = new core.StreamParser((s) => statuses.push(s));
+  const events = [
+    { type: "message_start", message: { content: [] } },
+    { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } },
+    { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "content_block_start", index: 1, content_block: { type: "server_tool_use", id: "s1", name: "web_search", input: {} } },
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"query":' } },
+    { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"jupiter moons"}' } },
+    { type: "content_block_stop", index: 1 },
+    { type: "content_block_start", index: 2, content_block: { type: "web_search_tool_result", tool_use_id: "s1", content: [{ type: "web_search_result", url: "u" }] } },
+    { type: "content_block_stop", index: 2 },
+    { type: "ping" },
+    { type: "content_block_start", index: 3, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 3, delta: { type: "citations_delta", citation: { type: "web_search_result_location", url: "https://nasa.gov/j" } } },
+    { type: "content_block_delta", index: 3, delta: { type: "text_delta", text: "Jupiter has 95 " } },
+    { type: "content_block_delta", index: 3, delta: { type: "text_delta", text: "moons." } },
+    { type: "content_block_stop", index: 3 },
+    { type: "content_block_start", index: 4, content_block: { type: "tool_use", id: "t1", name: "edit_note", input: {} } },
+    { type: "content_block_delta", index: 4, delta: { type: "input_json_delta", partial_json: '{"edits":[{"find":"79","rep' } },
+    { type: "content_block_delta", index: 4, delta: { type: "input_json_delta", partial_json: 'lace":"95"}]}' } },
+    { type: "content_block_stop", index: 4 },
+    { type: "message_delta", delta: { stop_reason: "tool_use" } },
+    { type: "message_stop" },
+  ];
+  for (const c of sse(events)) p.push(c);
+  const blocks = p.finish();
+  assert.equal(p.stopReason, "tool_use");
+  assert.deepEqual(blocks[0], { type: "thinking", thinking: "hmm", signature: "sig" });
+  assert.deepEqual(blocks[1].input, { query: "jupiter moons" });
+  assert.equal(blocks[2].content[0].url, "u");
+  assert.equal(blocks[3].text, "Jupiter has 95 moons.");
+  assert.equal(blocks[3].citations[0].url, "https://nasa.gov/j");
+  assert.deepEqual(core.resultFrom(blocks, p.stopReason!).edits, [{ find: "79", replace: "95" }]);
+  assert.deepEqual(statuses, ["Thinking", "Searching the web", "Reading", "Writing", "Editing"]);
+});
+
+test("a stream cut off mid-edit or ending in an error is reported", () => {
+  const p = new core.StreamParser();
+  for (const c of sse([
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", name: "edit_note", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"edits":[{"fi' } },
+    { type: "message_delta", delta: { stop_reason: "max_tokens" } },
+  ])) p.push(c);
+  assert.throws(() => core.resultFrom(p.finish(), p.stopReason!), /cut off/);
+
+  const q = new core.StreamParser();
+  assert.throws(() => sse([{ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }], 1000).forEach((c) => q.push(c)), /overloaded/);
+});
+
+test("a paused streamed turn resumes with its blocks as they arrived", () => {
+  const p = new core.StreamParser();
+  for (const c of sse([
+    { type: "content_block_start", index: 0, content_block: { type: "server_tool_use", id: "s1", name: "web_search", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"query":"x"}' } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "pause_turn" } },
+  ])) p.push(c);
+  const { body } = core.buildRequest(settings, "x", "y");
+  const next = core.resumeBody(body, p.finish());
+  assert.deepEqual(next.messages[1].content, [{ type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } }]);
 });

@@ -11,6 +11,7 @@ export interface InlineAISettings {
   refusalFallback: boolean;
   webSearch: boolean;
   showSources: boolean;
+  allowEdits: boolean;
 }
 
 export const DEFAULT_SETTINGS: InlineAISettings = {
@@ -23,6 +24,7 @@ export const DEFAULT_SETTINGS: InlineAISettings = {
   refusalFallback: true,
   webSearch: true,
   showSources: true,
+  allowEdits: true,
 };
 
 export class InlineAISettingTab extends PluginSettingTab {
@@ -66,6 +68,11 @@ export class InlineAISettingTab extends PluginSettingTab {
       .setName("Send on Enter")
       .setDesc("Send a tag when you finish its line. Off means only the command sends it.")
       .addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => { s.autoTrigger = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Let Claude edit the note")
+      .setDesc("When you ask it to fix, update or rewrite something, Claude changes that text in place. One undo reverts it.")
+      .addToggle((t) => t.setValue(s.allowEdits).onChange(async (v) => { s.allowEdits = v; await save(); }));
 
     new Setting(containerEl)
       .setName("Web search")
