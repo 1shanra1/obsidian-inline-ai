@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-inline-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tag Claude inline in an Obsidian note and keep writing.",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs",
+    "test": "node --experimental-strip-types --no-warnings --test test/core.test.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "obsidian": "^1.14.4",
+    "typescript": "^7.0.2"
+  }
+}

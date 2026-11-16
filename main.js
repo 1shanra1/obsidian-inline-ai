@@ -1,0 +1,298 @@
+"use strict";
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// src/main.ts
+var main_exports = {};
+__export(main_exports, {
+  default: () => InlineAIPlugin
+});
+module.exports = __toCommonJS(main_exports);
+var import_obsidian2 = require("obsidian");
+
+// src/core.ts
+var THINKING = " \u23F3 *AI is thinking\u2026*";
+var HERE = "<<<AI_TAG_HERE>>>";
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function findTag(line, tagWord = "@ai") {
+  const re = new RegExp(`(^|\\s)${escapeRegex(tagWord)}\\s+(\\S.*?)\\s*$`);
+  const m = re.exec(line);
+  if (!m) return null;
+  return { start: m.index + m[1].length, request: m[2] };
+}
+function newId() {
+  return Math.random().toString(36).slice(2, 8);
+}
+function marker(id) {
+  return `%%ai:${id}%%`;
+}
+function dispatchText(line, tag, id) {
+  const hidden = line.slice(0, tag.start) + "%%" + line.slice(tag.start).trimEnd() + "%%";
+  return hidden + "\n" + marker(id) + THINKING;
+}
+function findPlaceholder(lines, id) {
+  return lines.findIndex((l) => l.includes(marker(id)));
+}
+function replacementFor(lines, i, id, answer) {
+  const line = lines[i];
+  const re = new RegExp(escapeRegex(marker(id)) + "(" + escapeRegex(THINKING) + ")?");
+  const m = re.exec(line);
+  const before = line.slice(0, m.index);
+  const after = line.slice(m.index + m[0].length).trimStart();
+  let block = answer.trim();
+  const above = before.trim() !== "" ? before : i > 0 ? lines[i - 1] : "";
+  const below = after.trim() !== "" ? after : i < lines.length - 1 ? lines[i + 1] : "";
+  if (above.trim() !== "") block = "\n" + block;
+  if (below.trim() !== "") block = block + "\n";
+  return (before.trim() !== "" ? before + "\n" : "") + block + (after.trim() !== "" ? "\n" + after : "");
+}
+function applyAnswer(text, id, answer) {
+  const lines = text.split("\n");
+  const i = findPlaceholder(lines, id);
+  if (i < 0) return null;
+  lines[i] = replacementFor(lines, i, id, answer);
+  return lines.join("\n");
+}
+function buildContext(text, at, maxChars) {
+  const start = Math.max(0, at - Math.floor(maxChars * 0.75));
+  const end = Math.min(text.length, at + (maxChars - (at - start)));
+  return (start > 0 ? "\u2026" : "") + text.slice(start, at) + HERE + text.slice(at, end) + (end < text.length ? "\u2026" : "");
+}
+var SYSTEM_PROMPT = `You write content that is inserted straight into the user's Obsidian note, at the spot where they typed an inline request while writing. The note is given with ${HERE} marking that spot.
+
+Rules:
+- Output only the content to insert, in Obsidian-flavored Markdown. No preamble, no sign-off, don't repeat the request, and don't wrap the whole answer in a code block.
+- Fit the note: its language, tone and level of detail. Keep it short unless the request asks for more.
+- Tables: Markdown tables.
+- Diagrams, flowcharts, timelines, graphs and charts: a \`\`\`mermaid code block (Obsidian draws Mermaid; use xychart-beta for bar or line charts and pie for pie charts).
+- Images or illustrations: one \`\`\`svg code block holding a complete standalone SVG with xmlns and viewBox. It is saved as an image file.
+- Math: LaTeX between $ or $$.
+- When numbers come from your memory, say if they are approximate or may be out of date.`;
+var FALLBACK_MODELS = /^claude-(opus-5|fable-5|mythos-5|sonnet-5-5)/;
+function buildRequest(s, request, context) {
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": s.apiKey,
+    "anthropic-version": "2026-10-21",
+    "anthropic-dangerous-direct-browser-access": "true"
+  };
+  const body = {
+    model: s.model,
+    max_tokens: s.maxTokens,
+    system: SYSTEM_PROMPT,
+    output_config: { effort: s.effort },
+    messages: [{ role: "user", content: `<note>
+${context}
+</note>
+
+Request: ${request}` }]
+  };
+  if (s.refusalFallback && FALLBACK_MODELS.test(s.model)) {
+    headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
+    body.fallbacks = "default";
+  }
+  return { url: "https://api.anthropic.com/v1/messages", headers, body };
+}
+function parseResponse(status, json) {
+  if (status >= 400 || !json || json.type === "error") {
+    const msg = json?.error?.message ?? `request failed (HTTP ${status})`;
+    throw new Error(msg);
+  }
+  if (json.stop_reason === "refusal") {
+    throw new Error("Claude declined this request.");
+  }
+  const text = (json.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  let out = unwrapFence(text);
+  if (json.stop_reason === "max_tokens") out += "\n\n*(cut off: hit the max tokens setting)*";
+  return out;
+}
+function unwrapFence(text) {
+  const m = /^\s*```(?:markdown|md)[ \t]*\n([\s\S]*?)\n```\s*$/.exec(text);
+  return m ? m[1] : text;
+}
+function extractSvgs(md) {
+  const svgs = [];
+  const out = md.replace(/```(?:svg|xml|html)?[ \t]*\n\s*(<svg[\s\S]*?<\/svg>)\s*\n```/g, (_all, svg) => {
+    svgs.push(svg);
+    return `{{svg:${svgs.length - 1}}}`;
+  });
+  return { md: out, svgs };
+}
+
+// src/settings.ts
+var import_obsidian = require("obsidian");
+var DEFAULT_SETTINGS = {
+  apiKey: "",
+  model: "claude-opus-5-5",
+  effort: "medium",
+  tagWord: "@ai",
+  autoTrigger: true,
+  contextChars: 6e3,
+  maxTokens: 16e3,
+  refusalFallback: true
+};
+var InlineAISettingTab = class extends import_obsidian.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    const s = this.plugin.settings;
+    const save = () => this.plugin.saveSettings();
+    containerEl.empty();
+    new import_obsidian.Setting(containerEl).setName("Anthropic API key").setDesc("Stored in this plugin's data.json inside your vault, so it syncs with your vault.").addText((t) => {
+      t.inputEl.type = "password";
+      t.setPlaceholder("sk-ant-...").setValue(s.apiKey).onChange(async (v) => {
+        s.apiKey = v.trim();
+        await save();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Model").setDesc("Any Claude model id, e.g. claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5.").addText((t) => t.setValue(s.model).onChange(async (v) => {
+      s.model = v.trim();
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Effort").setDesc("Lower is faster and cheaper; higher thinks harder.").addDropdown((d) => {
+      for (const e of ["low", "medium", "high", "xhigh", "max"]) d.addOption(e, e);
+      d.setValue(s.effort).onChange(async (v) => {
+        s.effort = v;
+        await save();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Tag word").setDesc("What you type before a request.").addText((t) => t.setValue(s.tagWord).onChange(async (v) => {
+      s.tagWord = v.trim() || "@ai";
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Send on Enter").setDesc("Send a tag when you finish its line. Off means only the command sends it.").addToggle((t) => t.setValue(s.autoTrigger).onChange(async (v) => {
+      s.autoTrigger = v;
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Note context (characters)").setDesc("How much of the note around the tag is sent along.").addText((t) => t.setValue(String(s.contextChars)).onChange(async (v) => {
+      s.contextChars = Number(v) || DEFAULT_SETTINGS.contextChars;
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Max answer tokens").addText((t) => t.setValue(String(s.maxTokens)).onChange(async (v) => {
+      s.maxTokens = Number(v) || DEFAULT_SETTINGS.maxTokens;
+      await save();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Retry declined requests on another model").setDesc("If Claude's safety checks decline a request, Anthropic re-runs it on a fallback model.").addToggle((t) => t.setValue(s.refusalFallback).onChange(async (v) => {
+      s.refusalFallback = v;
+      await save();
+    }));
+  }
+};
+
+// src/main.ts
+var InlineAIPlugin = class extends import_obsidian2.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.lineCounts = /* @__PURE__ */ new WeakMap();
+  }
+  async onload() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.addSettingTab(new InlineAISettingTab(this.app, this));
+    this.addCommand({
+      id: "send-tag",
+      name: "Send the tag on this line",
+      editorCallback: (editor, ctx) => {
+        if (ctx.file) this.sendTag(editor, ctx.file, editor.getCursor().line, true);
+      }
+    });
+    this.registerEvent(
+      this.app.workspace.on("editor-change", (editor, info) => {
+        const count = editor.lineCount();
+        const before = this.lineCounts.get(editor) ?? count;
+        this.lineCounts.set(editor, count);
+        if (!this.settings.autoTrigger || count <= before || !info.file) return;
+        const line = editor.getCursor().line;
+        if (line > 0) this.sendTag(editor, info.file, line - 1, false);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        const view = leaf?.view;
+        if (view instanceof import_obsidian2.MarkdownView) this.lineCounts.set(view.editor, view.editor.lineCount());
+      })
+    );
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+  sendTag(editor, file, lineNo, fromCommand) {
+    const line = editor.getLine(lineNo);
+    const tag = findTag(line, this.settings.tagWord);
+    if (!tag) {
+      if (fromCommand) new import_obsidian2.Notice(`No ${this.settings.tagWord} tag on this line.`);
+      return;
+    }
+    if (!this.settings.apiKey) {
+      new import_obsidian2.Notice("Inline AI: add your Anthropic API key in the plugin settings.");
+      return;
+    }
+    const id = newId();
+    editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
+    const at = editor.posToOffset({ line: lineNo + 1, ch: 0 });
+    const context = buildContext(editor.getValue(), at, this.settings.contextChars);
+    this.ask(tag.request, context).then((answer) => this.saveSvgs(answer, file, id)).catch((err) => `> [!warning] Inline AI: ${err instanceof Error ? err.message : String(err)}`).then((answer) => this.deliver(file, id, answer));
+  }
+  async ask(request, context) {
+    const { url, headers, body } = buildRequest(this.settings, request, context);
+    const res = await (0, import_obsidian2.requestUrl)({ url, method: "POST", headers, body: JSON.stringify(body), throw: false });
+    let json = null;
+    try {
+      json = res.json;
+    } catch {
+    }
+    return parseResponse(res.status, json);
+  }
+  // Saves each SVG in the answer as a file in your attachments folder and embeds it.
+  async saveSvgs(answer, file, id) {
+    const { md, svgs } = extractSvgs(answer);
+    let out = md;
+    for (let i = 0; i < svgs.length; i++) {
+      const path = await this.app.fileManager.getAvailablePathForAttachment(`ai-${id}-${i + 1}.svg`, file.path);
+      const svgFile = await this.app.vault.create(path, svgs[i]);
+      out = out.replace(`{{svg:${i}}}`, "!" + this.app.fileManager.generateMarkdownLink(svgFile, file.path));
+    }
+    return out;
+  }
+  // Replaces the thinking line with the answer. Uses the open editor when it
+  // can, so your typing isn't disturbed; otherwise edits the file directly.
+  async deliver(file, id, answer) {
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (!(view instanceof import_obsidian2.MarkdownView) || view.file !== file || view.getMode() !== "source") continue;
+      const editor = view.editor;
+      const lines = editor.getValue().split("\n");
+      const i = findPlaceholder(lines, id);
+      if (i < 0) continue;
+      editor.replaceRange(replacementFor(lines, i, id, answer), { line: i, ch: 0 }, { line: i, ch: lines[i].length });
+      return;
+    }
+    let found = false;
+    await this.app.vault.process(file, (text) => {
+      const updated = applyAnswer(text, id, answer);
+      found = updated !== null;
+      return updated ?? text;
+    });
+    if (!found) new import_obsidian2.Notice("Inline AI: an answer arrived, but its thinking line was deleted, so it was dropped.");
+  }
+};

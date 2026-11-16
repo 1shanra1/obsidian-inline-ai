@@ -1,0 +1,9 @@
+{
+  "id": "inline-ai",
+  "name": "Inline AI",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.7",
+  "description": "Tag Claude in the middle of a note, keep writing, and the answer appears under the tag.",
+  "author": "1shanra1",
+  "isDesktopOnly": false
+}
