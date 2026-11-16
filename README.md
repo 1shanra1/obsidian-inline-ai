@@ -20,12 +20,22 @@ The code is three files: `src/core.ts` (tag and insert logic, tested), `src/main
 
 ## Install
 
-The plugin is two files: `main.js` and `manifest.json`. They go in `<your vault>/.obsidian/plugins/inline-ai/`.
+**On iPad, with no computer (BRAT):**
+
+1. In Obsidian, go to Settings → Community plugins → Browse, and install and enable **BRAT**.
+2. Open BRAT's settings, tap **Add Beta plugin**, and enter `1shanra1/obsidian-inline-ai`.
+3. Turn on **Inline AI** under Community plugins.
+
+BRAT installs the latest GitHub release and can update it later.
+
+**By copying files:** the plugin is two files, `main.js` and `manifest.json`. They go in `<your vault>/.obsidian/plugins/inline-ai/`.
 
 - **Vault in iCloud, with a Mac:** copy the two files into that folder on your Mac. iCloud syncs them to your iPad.
 - **Obsidian Sync:** copy them in on any computer, and turn on "Installed community plugins" in Sync settings on both devices.
 
-Then in Obsidian: Settings → Community plugins → turn on Inline AI, open its settings, and paste your Anthropic API key.
+Then turn on Inline AI under Community plugins.
+
+Either way, open Inline AI's settings and paste your Anthropic API key.
 
 ## Settings
 
