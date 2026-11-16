@@ -12,6 +12,8 @@ You can have several tags waiting at once. Ask for text, a table, a Mermaid diag
 
 It's tuned for taking notes while reading: ask it to explain an idea, check a claim, find a number or give an example. The answer's length fits the question. A number or a quick fact comes back as a line of plain text. An explainer comes back as a card, a quiet callout you can fold away, with the core idea first and short parts after it.
 
+To follow up on a card, tap **Reply** at its foot, or type `> @ai` on a new line inside it. Your question stays in the card as a quiet line, with Claude's answer under it, so the card reads as a short conversation. Claude sees the whole card, so "why?" or "give another example" works.
+
 Claude can also change what's already there. Write `@ai fix the dates in the paragraph above` or `@ai update these numbers to 2026`, and it edits that text in place, tidies up any blank lines left behind, and tells you what it changed in a pop-up. If the text changed while Claude was working, it changes nothing.
 
 A tag is temporary: once it's answered, it's gone, and the note keeps only your writing and Claude's answers. One undo turns an answer or an edit back into the `@ai ...` text you typed. If something goes wrong, a pop-up says what, and your tag comes back as text, so you can press Enter at its end to send it again.

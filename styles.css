@@ -106,3 +106,50 @@
 .callout[data-callout="ai"] > .callout-content table {
   font-size: 0.95em;
 }
+
+/* Follow-ups in a card: each question is a quiet line with a hairline above
+   it, and its answer follows as normal text. */
+.callout[data-callout="ai"] > .callout-content > blockquote {
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+  background: none;
+  margin: 1.1em 0 0.2em;
+  padding: 0.8em 0 0;
+  color: var(--text-muted);
+  font-size: 0.93em;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.callout[data-callout="ai"] > .callout-content > blockquote > p {
+  margin: 0;
+}
+
+.callout[data-callout="ai"] > .callout-content > blockquote > p:first-child::before {
+  content: "↳ ";
+  color: rgba(var(--interactive-accent-rgb), 0.75);
+}
+
+/* The Reply button at the foot of a card. */
+.callout[data-callout="ai"] > .inline-ai-reply {
+  display: block;
+  margin: 0.2em 0 -0.35em auto;
+  padding: 0.2em 0.55em;
+  height: auto;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--text-faint);
+  font-size: 0.82em;
+  cursor: pointer;
+}
+
+.callout[data-callout="ai"] > .inline-ai-reply:hover,
+.callout[data-callout="ai"] > .inline-ai-reply:active {
+  color: var(--text-accent);
+  background: none;
+}
+
+.callout.is-collapsed > .inline-ai-reply {
+  display: none;
+}

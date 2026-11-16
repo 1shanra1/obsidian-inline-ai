@@ -87,3 +87,79 @@ export function inlineAIExtension(getTagWord: () => string) {
     { decorations: (v) => v.decorations },
   );
 }
+
+/**
+ * Where a Reply to the card starting at `pos` goes: a new "> @ai " line at the
+ * card's end, after a blank "> " line so it reads as a new turn.
+ */
+export function replySpot(doc: { lines: number; line(n: number): { text: string; to: number }; lineAt(pos: number): { number: number } }, pos: number, tagWord: string) {
+  let n = doc.lineAt(pos).number;
+  while (n < doc.lines && /^[ \t]*>/.test(doc.line(n + 1).text)) n++;
+  const last = doc.line(n);
+  const insert = (/^[ \t]*>[ \t]*$/.test(last.text) ? "" : "\n>") + "\n> " + tagWord + " ";
+  return { from: last.to, insert, cursor: last.to + insert.length };
+}
+
+/**
+ * A small Reply button at the foot of each answer card in Live Preview. It
+ * starts a "> @ai " line inside the card, so the follow-up and its answer stay
+ * in the card. Obsidian draws the card, so the button is added to its DOM.
+ */
+export function replyButtons(getTagWord: () => string) {
+  return ViewPlugin.fromClass(
+    class {
+      private frame = 0;
+      private observer: MutationObserver;
+      constructor(readonly view: EditorView) {
+        this.observer = new MutationObserver(() => this.schedule());
+        this.observer.observe(view.contentDOM, { childList: true, subtree: true });
+        this.schedule();
+      }
+      update(u: ViewUpdate) {
+        if (u.docChanged || u.viewportChanged) this.schedule();
+      }
+      schedule() {
+        if (!this.frame) this.frame = requestAnimationFrame(() => ((this.frame = 0), this.addButtons()));
+      }
+      addButtons() {
+        if (!this.view.state.field(editorLivePreviewField, false)) return;
+        for (const card of Array.from(this.view.contentDOM.querySelectorAll<HTMLElement>('.callout[data-callout="ai"]'))) {
+          if (card.querySelector(":scope > .inline-ai-reply")) continue;
+          const button = card.appendChild(document.createElement("button"));
+          button.className = "inline-ai-reply";
+          button.textContent = "Reply";
+          button.setAttribute("aria-label", "Ask a follow-up in this card");
+          // Keep Obsidian from opening the card's source at the tap point.
+          for (const type of ["pointerdown", "mousedown", "touchstart"]) {
+            button.addEventListener(type, (ev) => (ev.stopPropagation(), type !== "touchstart" && ev.preventDefault()));
+          }
+          button.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            this.reply(card);
+          });
+        }
+      }
+      reply(card: HTMLElement) {
+        let pos: number;
+        try {
+          pos = this.view.posAtDOM(card);
+        } catch {
+          return;
+        }
+        const spot = replySpot(this.view.state.doc, pos, getTagWord());
+        this.view.dispatch({
+          changes: { from: spot.from, insert: spot.insert },
+          selection: { anchor: spot.cursor },
+          scrollIntoView: true,
+          userEvent: "input",
+        });
+        this.view.focus();
+      }
+      destroy() {
+        this.observer.disconnect();
+        cancelAnimationFrame(this.frame);
+      }
+    },
+  );
+}

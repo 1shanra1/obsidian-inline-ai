@@ -48,7 +48,19 @@ function marker(id) {
 }
 function dispatchText(line, tag, id) {
   const hidden = line.slice(0, tag.start) + "%%" + line.slice(tag.start).trimEnd() + "%%";
-  return hidden + "\n" + marker(id) + THINKING;
+  return hidden + "\n" + quoteOf(line) + marker(id) + THINKING;
+}
+function quoteOf(line) {
+  return /^(?:[ \t]*>)+[ \t]?/.exec(line)?.[0] ?? "";
+}
+function inCard(lines, i) {
+  for (let n = i; n >= 0 && quoteOf(lines[n]); n--) {
+    if (/^[ \t]*>[ \t]*\[!ai\]/i.test(lines[n])) return true;
+  }
+  return false;
+}
+function quoteOnly(line) {
+  return /^(?:[ \t]*>)*[ \t]*$/.test(line);
 }
 function findPlaceholder(lines, id) {
   return lines.findIndex((l) => l.includes(marker(id)));
@@ -83,16 +95,21 @@ function findSlot(text, id, tagWord = "@ai") {
   const tagM = i > 0 ? new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%\\s*$`).exec(lines[i - 1]) : null;
   const first = tagM ? i - 1 : i;
   const beforeTag = tagM ? lines[i - 1].slice(0, tagM.index).trimEnd() : "";
+  const quote = quoteOf(lines[first]);
+  const keep = (t) => t.trim() !== "" && !(quote && quoteOnly(t));
   return {
     from: starts[first],
     to: starts[i] + line.length,
     hereFrom: tagM ? starts[i - 1] + tagM.index : starts[i] + m.index,
     hereTo: starts[i] + m.index + m[0].length,
-    keptBefore: [beforeTag, beforePill].filter((t) => t !== ""),
+    keptBefore: [beforeTag, beforePill].filter(keep),
     keptAfter: afterPill,
-    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter((t) => t.trim() !== "").join("\n"),
+    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter(keep).join("\n"),
     above: first > 0 ? lines[first - 1] : "",
-    below: i < lines.length - 1 ? lines[i + 1] : ""
+    below: i < lines.length - 1 ? lines[i + 1] : "",
+    quote,
+    card: quote !== "" && inCard(lines, first),
+    question: tagM ? tagM[1].slice(tagWord.length).trim() : ""
   };
 }
 function allSlots(text, tagWord) {
@@ -105,12 +122,24 @@ function allSlots(text, tagWord) {
 }
 function slotText(slot, answer) {
   if (!answer.trim()) return [...slot.keptBefore, slot.keptAfter].filter((t) => t !== "").join("\n");
+  if (slot.quote) return quotedSlotText(slot, answer);
   let block = answer.trim();
   const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
   const below = slot.keptAfter || slot.below;
   if (above.trim() !== "") block = "\n" + block;
   if (below.trim() !== "") block = block + "\n";
   return [...slot.keptBefore, block, ...slot.keptAfter ? [slot.keptAfter] : []].join("\n");
+}
+function quotedSlotText(slot, answer) {
+  const q = slot.quote.endsWith(" ") ? slot.quote : slot.quote + " ";
+  const blank = q.trimEnd();
+  const body = answer.trim().split("\n").map((l) => l.trim() ? q + l : blank);
+  const lines = slot.card && slot.question ? [q + "> " + slot.question, blank, ...body] : body;
+  const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
+  const below = slot.keptAfter || slot.below;
+  if (quoteOf(above) && !quoteOnly(above)) lines.unshift(blank);
+  if (slot.keptAfter || quoteOf(below) && !quoteOnly(below)) lines.push(blank);
+  return [...slot.keptBefore, ...lines, ...slot.keptAfter ? [slot.keptAfter] : []].join("\n");
 }
 function buildContext(text, id, tagWord = "@ai") {
   const cuts = allSlots(text, tagWord).map(({ id: other, slot }) => ({ from: slot.hereFrom, to: slot.hereTo, insert: other === id ? HERE : "" }));
@@ -139,6 +168,10 @@ Formatting, so it's easy to take in:
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
 - Output only the content to insert, never wrapped in a code block.
+
+Follow-ups in a card:
+- An answer card is a block of lines starting with "> " under a "> [!ai]" title line. If ${HERE} is inside one, the request is a follow-up to that card, and the card is your conversation so far: your earlier answer, then any earlier follow-ups, each a "> > question" line with its answer under it.
+- Answer only the new question. Build on what the card already says without repeating it, keep it short, and give no Title line. Write plain Markdown without the "> "; the app adds it.
 
 Web search, when available:
 - Use it when the answer depends on facts, figures, dates or anything recent. Skip it for writing, rewording or brainstorming.
@@ -574,6 +607,70 @@ function inlineAIExtension(getTagWord) {
     { decorations: (v) => v.decorations }
   );
 }
+function replySpot(doc, pos, tagWord) {
+  let n = doc.lineAt(pos).number;
+  while (n < doc.lines && /^[ \t]*>/.test(doc.line(n + 1).text)) n++;
+  const last = doc.line(n);
+  const insert = (/^[ \t]*>[ \t]*$/.test(last.text) ? "" : "\n>") + "\n> " + tagWord + " ";
+  return { from: last.to, insert, cursor: last.to + insert.length };
+}
+function replyButtons(getTagWord) {
+  return import_view.ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.view = view;
+        this.frame = 0;
+        this.observer = new MutationObserver(() => this.schedule());
+        this.observer.observe(view.contentDOM, { childList: true, subtree: true });
+        this.schedule();
+      }
+      update(u) {
+        if (u.docChanged || u.viewportChanged) this.schedule();
+      }
+      schedule() {
+        if (!this.frame) this.frame = requestAnimationFrame(() => (this.frame = 0, this.addButtons()));
+      }
+      addButtons() {
+        if (!this.view.state.field(import_obsidian.editorLivePreviewField, false)) return;
+        for (const card of Array.from(this.view.contentDOM.querySelectorAll('.callout[data-callout="ai"]'))) {
+          if (card.querySelector(":scope > .inline-ai-reply")) continue;
+          const button = card.appendChild(document.createElement("button"));
+          button.className = "inline-ai-reply";
+          button.textContent = "Reply";
+          button.setAttribute("aria-label", "Ask a follow-up in this card");
+          for (const type of ["pointerdown", "mousedown", "touchstart"]) {
+            button.addEventListener(type, (ev) => (ev.stopPropagation(), type !== "touchstart" && ev.preventDefault()));
+          }
+          button.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            this.reply(card);
+          });
+        }
+      }
+      reply(card) {
+        let pos;
+        try {
+          pos = this.view.posAtDOM(card);
+        } catch {
+          return;
+        }
+        const spot = replySpot(this.view.state.doc, pos, getTagWord());
+        this.view.dispatch({
+          changes: { from: spot.from, insert: spot.insert },
+          selection: { anchor: spot.cursor },
+          scrollIntoView: true,
+          userEvent: "input"
+        });
+        this.view.focus();
+      }
+      destroy() {
+        this.observer.disconnect();
+        cancelAnimationFrame(this.frame);
+      }
+    }
+  );
+}
 
 // src/settings.ts
 var import_obsidian2 = require("obsidian");
@@ -674,7 +771,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.addSettingTab(new InlineAISettingTab(this.app, this));
-    this.registerEditorExtension(inlineAIExtension(() => this.settings.tagWord));
+    this.registerEditorExtension([inlineAIExtension(() => this.settings.tagWord), replyButtons(() => this.settings.tagWord)]);
     this.addCommand({
       id: "send-tag",
       name: "Send the tag on this line",
@@ -724,6 +821,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
       new import_obsidian3.Notice("Inline AI: add your Anthropic API key in the plugin settings.");
       return;
     }
+    const quoted = quoteOf(line) !== "";
     const id = newId();
     setPillStatus(id, "Thinking");
     editor.replaceRange(dispatchText(line, tag, id), { line: lineNo, ch: 0 }, { line: lineNo, ch: line.length });
@@ -731,7 +829,7 @@ var InlineAIPlugin = class extends import_obsidian3.Plugin {
     const trace = { at: /* @__PURE__ */ new Date(), note: file.basename, request: tag.request, rounds: [] };
     this.ask(id, tag.request, context, file.basename, trace).then(async (result) => ({
       ...result,
-      answer: formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards)
+      answer: formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards && !quoted)
     })).catch((err) => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` })).then(async (result) => {
       await this.deliver(file, id, result);
       if (this.settings.debugLog) await this.writeLog(trace, result);

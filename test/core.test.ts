@@ -422,3 +422,46 @@ test("the prompt asks for length to fit the request and a title for longer repli
   assert.match(p, /Fit the length to the request/);
   assert.match(p, /"Title: "/);
 });
+
+const card = "Notes.\n\n> [!ai]+ Why Stoics journal\n> Writing it down makes the day's choices visible.\n>\n> **Example:** Marcus wrote to himself.";
+
+test("a tag inside a card keeps its pill inside the card", () => {
+  const sent = send(card + "\n> @ai why at night?\n> ", 6, "c1");
+  assert.equal(sent.split("\n")[7], '> %%ai:c1%%<span class="inline-ai-thinking"><span>Thinking</span></span>');
+  assert.match(core.buildContext(sent, "c1"), /\n> <<<AI_TAG_HERE>>>\n> $/);
+});
+
+test("a follow-up answer lands in the card under its question", () => {
+  const sent = send(card + "\n> @ai why at night?\n> ", 6, "c1");
+  assert.equal(
+    answer(sent, "c1", "Because the day is done.\n\nIt also helps sleep."),
+    card + "\n>\n> > why at night?\n>\n> Because the day is done.\n>\n> It also helps sleep.\n> ",
+  );
+});
+
+test("a second follow-up after a blank card line adds no extra gap, and text after the card stays out", () => {
+  const sent = send(card + "\n>\n> @ai and in the morning?\n\nMy own notes.", 7, "c2");
+  assert.equal(answer(sent, "c2", "Plan the day."), card + "\n>\n> > and in the morning?\n>\n> Plan the day.\n\nMy own notes.");
+});
+
+test("a failed follow-up comes back as the line you typed", () => {
+  const sent = send(card + "\n> @ai why at night?\n> ", 6, "c1");
+  assert.equal(finish(sent, "c1", { answer: "", edits: null, error: "x" }), card + "\n> @ai why at night?\n> ");
+});
+
+test("a tag in a plain quote answers inside the quote, without the question", () => {
+  const sent = send("> A quote I liked.\n> @ai who said this?", 1, "q1");
+  assert.equal(answer(sent, "q1", "Seneca, letter 7."), "> A quote I liked.\n>\n> Seneca, letter 7.");
+});
+
+test("knows when a line is inside a card", () => {
+  const lines = (card + "\n> @ai x\nafter").split("\n");
+  assert.equal(core.inCard(lines, 6), true);
+  assert.equal(core.inCard(lines, 7), false);
+  assert.equal(core.inCard(["> plain quote", "> @ai x"], 1), false);
+  assert.equal(core.quoteOf("> > hi"), "> > ");
+});
+
+test("the prompt explains follow-ups in a card", () => {
+  assert.match(core.systemPrompt(false), /Follow-ups in a card/);
+});

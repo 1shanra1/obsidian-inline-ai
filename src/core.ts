@@ -75,7 +75,25 @@ export function marker(id: string): string {
  */
 export function dispatchText(line: string, tag: Tag, id: string): string {
   const hidden = line.slice(0, tag.start) + "%%" + line.slice(tag.start).trimEnd() + "%%";
-  return hidden + "\n" + marker(id) + THINKING;
+  return hidden + "\n" + quoteOf(line) + marker(id) + THINKING;
+}
+
+/** The "> " a line starts with when it's inside a quote or card, else "". */
+export function quoteOf(line: string): string {
+  return /^(?:[ \t]*>)+[ \t]?/.exec(line)?.[0] ?? "";
+}
+
+/** Whether line i sits inside an answer card (a callout starting "> [!ai]"). */
+export function inCard(lines: string[], i: number): boolean {
+  for (let n = i; n >= 0 && quoteOf(lines[n]); n--) {
+    if (/^[ \t]*>[ \t]*\[!ai\]/i.test(lines[n])) return true;
+  }
+  return false;
+}
+
+// A line that holds nothing but quote markers, like ">".
+function quoteOnly(line: string): boolean {
+  return /^(?:[ \t]*>)*[ \t]*$/.test(line);
 }
 
 export function findPlaceholder(lines: string[], id: string): number {
@@ -121,6 +139,9 @@ export interface Slot {
   restore: string; // the slot as plain text with the tag unsent, e.g. "@ai a table"
   above: string; // the line just above the slot
   below: string; // the line just below it
+  quote: string; // "> " when the tag was typed inside a quote or card
+  card: boolean; // typed inside an answer card: a follow-up to it
+  question: string; // the request, without the tag word
 }
 
 export function findSlot(text: string, id: string, tagWord = "@ai"): Slot | null {
@@ -140,16 +161,21 @@ export function findSlot(text: string, id: string, tagWord = "@ai"): Slot | null
   const tagM = i > 0 ? new RegExp(`%%(${escapeRegex(tagWord)}\\s[^\\n]*?)%%\\s*$`).exec(lines[i - 1]) : null;
   const first = tagM ? i - 1 : i;
   const beforeTag = tagM ? lines[i - 1].slice(0, tagM.index).trimEnd() : "";
+  const quote = quoteOf(lines[first]);
+  const keep = (t: string) => t.trim() !== "" && !(quote && quoteOnly(t));
   return {
     from: starts[first],
     to: starts[i] + line.length,
     hereFrom: tagM ? starts[i - 1] + tagM.index : starts[i] + m.index,
     hereTo: starts[i] + m.index + m[0].length,
-    keptBefore: [beforeTag, beforePill].filter((t) => t !== ""),
+    keptBefore: [beforeTag, beforePill].filter(keep),
     keptAfter: afterPill,
-    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter((t) => t.trim() !== "").join("\n"),
+    restore: [tagM ? lines[i - 1].slice(0, tagM.index) + tagM[1] : "", beforePill, afterPill].filter(keep).join("\n"),
     above: first > 0 ? lines[first - 1] : "",
     below: i < lines.length - 1 ? lines[i + 1] : "",
+    quote,
+    card: quote !== "" && inCard(lines, first),
+    question: tagM ? tagM[1].slice(tagWord.length).trim() : "",
   };
 }
 
@@ -166,12 +192,28 @@ function allSlots(text: string, tagWord: string): { id: string; slot: Slot }[] {
 // around it so tables and other blocks render, plus anything you'd typed there.
 function slotText(slot: Slot, answer: string): string {
   if (!answer.trim()) return [...slot.keptBefore, slot.keptAfter].filter((t) => t !== "").join("\n");
+  if (slot.quote) return quotedSlotText(slot, answer);
   let block = answer.trim();
   const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
   const below = slot.keptAfter || slot.below;
   if (above.trim() !== "") block = "\n" + block;
   if (below.trim() !== "") block = block + "\n";
   return [...slot.keptBefore, block, ...(slot.keptAfter ? [slot.keptAfter] : [])].join("\n");
+}
+
+// Inside a card or quote, the answer stays inside it: every line keeps the
+// "> ". In a card, the question stays too, as a "> > question" line, so the
+// card reads as a short conversation.
+function quotedSlotText(slot: Slot, answer: string): string {
+  const q = slot.quote.endsWith(" ") ? slot.quote : slot.quote + " ";
+  const blank = q.trimEnd();
+  const body = answer.trim().split("\n").map((l) => (l.trim() ? q + l : blank));
+  const lines = slot.card && slot.question ? [q + "> " + slot.question, blank, ...body] : body;
+  const above = slot.keptBefore.length ? slot.keptBefore[slot.keptBefore.length - 1] : slot.above;
+  const below = slot.keptAfter || slot.below;
+  if (quoteOf(above) && !quoteOnly(above)) lines.unshift(blank);
+  if (slot.keptAfter || (quoteOf(below) && !quoteOnly(below))) lines.push(blank);
+  return [...slot.keptBefore, ...lines, ...(slot.keptAfter ? [slot.keptAfter] : [])].join("\n");
 }
 
 /**
@@ -208,6 +250,10 @@ Formatting, so it's easy to take in:
 - Tables, charts, diagrams and images only when asked or when they clearly beat prose here. Tables in Markdown. Charts and diagrams as a \`\`\`mermaid block (xychart-beta for bar or line charts, pie for pie charts). Images as one \`\`\`svg block holding a complete standalone SVG with xmlns and viewBox; it is saved as an image file.
 - Math in LaTeX between $ or $$.
 - Output only the content to insert, never wrapped in a code block.
+
+Follow-ups in a card:
+- An answer card is a block of lines starting with "> " under a "> [!ai]" title line. If ${HERE} is inside one, the request is a follow-up to that card, and the card is your conversation so far: your earlier answer, then any earlier follow-ups, each a "> > question" line with its answer under it.
+- Answer only the new question. Build on what the card already says without repeating it, keep it short, and give no Title line. Write plain Markdown without the "> "; the app adds it.
 
 Web search, when available:
 - Use it when the answer depends on facts, figures, dates or anything recent. Skip it for writing, rewording or brainstorming.

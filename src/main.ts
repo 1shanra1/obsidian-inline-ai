@@ -3,7 +3,7 @@ import { Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { Editor, MarkdownView, Notice, Plugin, TFile, requestUrl } from "obsidian";
 import * as core from "./core";
-import { inlineAIExtension, isInFlight, setPillStatus } from "./editor";
+import { inlineAIExtension, isInFlight, replyButtons, setPillStatus } from "./editor";
 import { DEFAULT_SETTINGS, InlineAISettings, InlineAISettingTab } from "./settings";
 
 export default class InlineAIPlugin extends Plugin {
@@ -14,7 +14,7 @@ export default class InlineAIPlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.addSettingTab(new InlineAISettingTab(this.app, this));
-    this.registerEditorExtension(inlineAIExtension(() => this.settings.tagWord));
+    this.registerEditorExtension([inlineAIExtension(() => this.settings.tagWord), replyButtons(() => this.settings.tagWord)]);
 
     // Fallback: send the tag on the cursor's line from the command palette.
     this.addCommand({
@@ -73,6 +73,9 @@ export default class InlineAIPlugin extends Plugin {
       return;
     }
 
+    // Inside a card or quote, the answer goes into it rather than a new card.
+    const quoted = core.quoteOf(line) !== "";
+
     // One edit: hide the tag in a comment and add the thinking line below it.
     const id = core.newId();
     setPillStatus(id, "Thinking");
@@ -83,7 +86,7 @@ export default class InlineAIPlugin extends Plugin {
     this.ask(id, tag.request, context, file.basename, trace)
       .then(async (result) => ({
         ...result,
-        answer: core.formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards),
+        answer: core.formatAnswer(await this.saveSvgs(result.answer, file, id), tag.request, this.settings.cards && !quoted),
       }))
       .catch((err): core.Result => ({ answer: "", edits: null, error: `couldn't answer: ${errorText(err)}` }))
       .then(async (result) => {
